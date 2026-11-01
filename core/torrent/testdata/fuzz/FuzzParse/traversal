@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("d4:infod5:filesld6:lengthi3e4:pathl2:..6:passwdeee4:name1:d12:piece lengthi16e6:pieces20:xxxxxxxxxxxxxxxxxxxxee")
