@@ -1,0 +1,14 @@
+# Build output
+/bin/
+/dist/
+
+# Test and profiling output
+*.test
+*.out
+*.prof
+coverage.*
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
