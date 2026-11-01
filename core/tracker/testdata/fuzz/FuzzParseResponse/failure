@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("d14:failure reason7:unknowne")

@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("d8:intervali1800e5:peers12:\x7f\x00\x00\x01\x1a\xe1\x0a\x00\x00\x02\x00\x50e")
