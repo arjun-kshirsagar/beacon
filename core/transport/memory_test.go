@@ -1,0 +1,100 @@
+package transport
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net"
+	"os"
+	"testing"
+	"time"
+)
+
+func TestMemoryRoundTrip(t *testing.T) {
+	m := NewMemory()
+	l, err := m.Listen("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	srvErr := make(chan error, 1)
+	go func() {
+		c, err := l.Accept()
+		if err != nil {
+			srvErr <- err
+			return
+		}
+		defer c.Close()
+		// Both sides write before reading; buffered pipes must not deadlock.
+		if _, err := c.Write([]byte("pong")); err != nil {
+			srvErr <- err
+			return
+		}
+		buf := make([]byte, 4)
+		if _, err := io.ReadFull(c, buf); err != nil {
+			srvErr <- err
+			return
+		}
+		if string(buf) != "ping" {
+			srvErr <- errors.New("server got " + string(buf))
+			return
+		}
+		srvErr <- nil
+	}()
+
+	c, err := m.Dial(context.Background(), l.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(c, buf); err != nil {
+		t.Fatal(err)
+	}
+	if string(buf) != "pong" {
+		t.Fatalf("client got %q", buf)
+	}
+	if err := <-srvErr; err != nil {
+		t.Fatal(err)
+	}
+	// The server closed its end: the client reads EOF.
+	if _, err := c.Read(buf); err != io.EOF {
+		t.Fatalf("read after peer close: got %v, want EOF", err)
+	}
+	c.Close()
+	if _, err := c.Read(buf); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("read after close: got %v, want ErrClosed", err)
+	}
+}
+
+func TestMemoryDialUnknown(t *testing.T) {
+	m := NewMemory()
+	if _, err := m.Dial(context.Background(), "nowhere"); !errors.Is(err, ErrConnRefused) {
+		t.Fatalf("got %v, want ErrConnRefused", err)
+	}
+}
+
+func TestMemoryReadDeadline(t *testing.T) {
+	m := NewMemory()
+	l, _ := m.Listen("srv")
+	defer l.Close()
+	go func() {
+		c, err := l.Accept()
+		if err == nil {
+			defer c.Close()
+			time.Sleep(200 * time.Millisecond)
+		}
+	}()
+	c, err := m.Dial(context.Background(), "srv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
+	if _, err := c.Read(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("got %v, want deadline exceeded", err)
+	}
+}
