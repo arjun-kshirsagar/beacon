@@ -98,3 +98,35 @@ func TestMemoryReadDeadline(t *testing.T) {
 		t.Fatalf("got %v, want deadline exceeded", err)
 	}
 }
+
+func TestMemoryPackets(t *testing.T) {
+	m := NewMemory()
+	a, err := m.ListenPacket("10.0.0.1:6881")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, _ := m.ListenPacket("")
+	defer b.Close()
+
+	dst, _ := m.ResolveAddr(context.Background(), "10.0.0.1:6881")
+	b.WriteTo([]byte("hello"), dst)
+	// Datagrams to nowhere vanish without error, as with UDP.
+	if _, err := b.WriteTo([]byte("lost"), memAddr("10.9.9.9:1")); err != nil {
+		t.Fatal(err)
+	}
+
+	buf := make([]byte, 64)
+	n, from, err := a.ReadFrom(buf)
+	if err != nil || string(buf[:n]) != "hello" || from.String() != b.LocalAddr().String() {
+		t.Fatalf("got %q from %v, %v", buf[:n], from, err)
+	}
+	a.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
+	if _, _, err := a.ReadFrom(buf); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("got %v, want deadline exceeded", err)
+	}
+	a.Close()
+	if _, _, err := a.ReadFrom(buf); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("got %v, want ErrClosed", err)
+	}
+}

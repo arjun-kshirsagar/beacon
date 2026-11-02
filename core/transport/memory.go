@@ -15,12 +15,14 @@ import (
 // ErrConnRefused is returned when dialing an address nobody listens on.
 var ErrConnRefused = errors.New("transport: connection refused")
 
-// Memory is an in-process network for tests. Connections are buffered pipes, so
-// both ends may write before reading without deadlocking, as with real sockets.
-// Buffers are unbounded; Memory is not meant for production traffic.
+// Memory is an in-process network for tests. It implements both Transport and
+// PacketTransport. Connections are buffered pipes, so both ends may write before
+// reading without deadlocking, as with real sockets. Stream buffers are
+// unbounded; Memory is not meant for production traffic.
 type Memory struct {
 	mu        sync.Mutex
 	listeners map[string]*memListener
+	packets   map[string]*memPacketConn
 	next      int
 }
 
