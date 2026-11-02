@@ -335,3 +335,10 @@ func TestWrongInfoHash(t *testing.T) {
 		t.Fatal("seeder handshook for an unknown torrent")
 	}
 }
+
+func mkdirWrite(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
