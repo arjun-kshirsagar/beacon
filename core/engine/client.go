@@ -31,6 +31,7 @@ const (
 	redialAfter       = 5 * time.Minute
 	banStrikes        = 3 // shared hash failures before a peer is banned
 	metadataExtID     = 1 // our ut_metadata extended message ID
+	pexExtID          = 2 // our ut_pex extended message ID
 	clientVersion     = "Beacon/0.2"
 	dialTimeout       = 15 * time.Second
 	ioTimeout         = 60 * time.Second
@@ -222,6 +223,8 @@ func (c *Client) Run(ctx context.Context) error {
 	defer wg.Wait()
 	tick := time.NewTicker(rechokeInterval)
 	defer tick.Stop()
+	pexTick := time.NewTicker(pexInterval)
+	defer pexTick.Stop()
 	round := 0
 	for {
 		c.mu.Lock()
@@ -245,6 +248,8 @@ func (c *Client) Run(ctx context.Context) error {
 		case <-tick.C:
 			c.rechoke(round%optimisticEvery == 0)
 			round++
+		case <-pexTick.C:
+			c.sendPEX()
 		}
 	}
 }

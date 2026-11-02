@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -51,6 +52,11 @@ type peerConn struct {
 	rateUp         int64 // bytes sent since the last rechoke
 	lastBlock      time.Time
 	extMetadata    int // the peer's ut_metadata message ID; 0 if unsupported
+	extPEX         int // the peer's ut_pex message ID; 0 if unsupported
+	outgoing       bool
+	listenAddr     string          // where others can reach this peer; "" if unknown
+	pexSent        map[string]bool // addresses we have told this peer about
+	lastPEXIn      time.Time
 }
 
 func (pc *peerConn) close() {
@@ -101,7 +107,9 @@ func (c *Client) runConn(ctx context.Context, conn net.Conn, addr string, outgoi
 		has:         peer.NewBitfield(c.t.NumPieces()),
 		peerChoking: true,
 		amChoking:   true,
+		outgoing:    outgoing,
 		outstanding: make(map[blockRef]bool),
+		pexSent:     make(map[string]bool),
 	}
 	defer pc.close()
 	defer context.AfterFunc(ctx, pc.close)()
@@ -195,6 +203,9 @@ func (c *Client) register(pc *peerConn, h peer.Handshake) error {
 		return errDuplicate
 	}
 	pc.id = h.PeerID
+	if pc.outgoing {
+		pc.listenAddr = pc.addr
+	}
 	c.dialing--
 	c.conns[pc] = true
 	c.peerIDs[h.PeerID] = true
@@ -202,8 +213,12 @@ func (c *Client) register(pc *peerConn, h peer.Handshake) error {
 		pc.queue(&peer.Message{ID: peer.MsgBitfield, Payload: append([]byte(nil), c.pk.have...)})
 	}
 	if h.SupportsExtensions() {
+		m := map[string]int{peer.ExtMetadata: metadataExtID}
+		if !c.t.Private { // BEP 27: private torrents get peers from trackers only
+			m[peer.ExtPEX] = pexExtID
+		}
 		eh := peer.ExtHandshake{
-			M:            map[string]int{peer.ExtMetadata: metadataExtID},
+			M:            m,
 			MetadataSize: len(c.t.InfoBytes),
 			Version:      clientVersion,
 			Port:         int(c.port),
@@ -404,7 +419,15 @@ func (pc *peerConn) handleExtended(m *peer.Message) error {
 		}
 		c.mu.Lock()
 		pc.extMetadata = eh.M[peer.ExtMetadata]
+		pc.extPEX = eh.M[peer.ExtPEX]
+		if !pc.outgoing && eh.Port > 0 {
+			// An incoming peer's source port is ephemeral; its handshake tells
+			// us the port it listens on.
+			pc.listenAddr = net.JoinHostPort(banKey(pc.addr), strconv.Itoa(eh.Port))
+		}
 		c.mu.Unlock()
+	case pexExtID:
+		return pc.handlePEX(body)
 	case metadataExtID:
 		mm, err := peer.ParseMetadataMsg(body)
 		if err != nil {
@@ -427,6 +450,35 @@ func (pc *peerConn) handleExtended(m *peer.Message) error {
 		}
 		return pc.queueData(peer.Extended(uint8(theirID), reply.Encode()))
 	}
+	return nil
+}
+
+// handlePEX adds the peers a PEX message names. Messages arriving faster than
+// half the PEX interval are ignored, so one peer cannot flood the dial queue.
+func (pc *peerConn) handlePEX(body []byte) error {
+	c := pc.c
+	if c.t.Private {
+		return nil
+	}
+	c.mu.Lock()
+	tooSoon := time.Since(pc.lastPEXIn) < pexInterval/2
+	if !tooSoon {
+		pc.lastPEXIn = time.Now()
+	}
+	c.mu.Unlock()
+	if tooSoon {
+		return nil
+	}
+	p, err := peer.ParsePEX(body)
+	if err != nil {
+		return err
+	}
+	addrs := make([]string, len(p.Added))
+	for i, a := range p.Added {
+		addrs[i] = a.String()
+	}
+	c.AddPeers(addrs...)
+	c.log.Debug("PEX supplied peers", "from", pc.addr, "added", len(p.Added), "dropped", len(p.Dropped))
 	return nil
 }
 
