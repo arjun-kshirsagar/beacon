@@ -120,10 +120,11 @@ func newLogger(verbose bool) *slog.Logger {
 
 // swarmFlags are shared by get and seed.
 type swarmFlags struct {
-	port    *uint
-	noDHT   *bool
-	verbose *bool
-	peers   stringList
+	port       *uint
+	noDHT      *bool
+	verbose    *bool
+	encryption *string
+	peers      stringList
 }
 
 func addSwarmFlags(fs *flag.FlagSet) *swarmFlags {
@@ -131,9 +132,35 @@ func addSwarmFlags(fs *flag.FlagSet) *swarmFlags {
 		port:    fs.Uint("port", 6881, "TCP port for peers and UDP port for the DHT"),
 		noDHT:   fs.Bool("no-dht", false, "do not use the DHT"),
 		verbose: fs.Bool("v", false, "verbose logging"),
+		encryption: fs.String("encryption", "prefer",
+			"peer encryption (MSE): prefer, require, or off"),
 	}
 	fs.Var(&sf.peers, "peer", "peer host:port to connect to (repeatable)")
 	return sf
+}
+
+// netOpts is what get and seed need to reach peers.
+type netOpts struct {
+	port  uint16
+	node  *dht.Node // nil when the DHT is off
+	peers []string  // extra peers to try
+	enc   engine.Encryption
+	log   *slog.Logger
+}
+
+// open turns parsed flags into netOpts, starting the DHT unless it is off.
+func (sf *swarmFlags) open(ctx context.Context) (netOpts, error) {
+	o := netOpts{port: uint16(*sf.port), peers: sf.peers, log: newLogger(*sf.verbose)}
+	var err error
+	if o.enc, err = engine.ParseEncryption(*sf.encryption); err != nil {
+		return o, err
+	}
+	if !*sf.noDHT {
+		if o.node, err = startDHT(ctx, o.port, o.log); err != nil {
+			return o, fmt.Errorf("starting DHT: %w", err)
+		}
+	}
+	return o, nil
 }
 
 // swarm is a running client with its listener, DHT node and peer discovery.
@@ -145,7 +172,8 @@ type swarm struct {
 
 // joinSwarm opens storage for t under dir, starts accepting peers, and starts
 // discovering peers through trackers, the DHT and the given addresses.
-func joinSwarm(ctx context.Context, t *torrent.Torrent, dir string, port uint16, node *dht.Node, extra []string, log *slog.Logger) (*swarm, error) {
+func joinSwarm(ctx context.Context, t *torrent.Torrent, dir string, o netOpts) (*swarm, error) {
+	port, node, log := o.port, o.node, o.log
 	tr := &transport.TCP{}
 	l, err := tr.Listen(fmt.Sprintf(":%d", port))
 	if err != nil {
@@ -156,7 +184,7 @@ func joinSwarm(ctx context.Context, t *torrent.Torrent, dir string, port uint16,
 		l.Close()
 		return nil, err
 	}
-	c, err := engine.New(t, store, engine.Config{Transport: tr, ListenPort: port, Logger: log})
+	c, err := engine.New(t, store, engine.Config{Transport: tr, ListenPort: port, Encryption: o.enc, Logger: log})
 	if err != nil {
 		l.Close()
 		store.Close()
@@ -167,7 +195,7 @@ func joinSwarm(ctx context.Context, t *torrent.Torrent, dir string, port uint16,
 	done := make(chan struct{}, 3)
 	go func() { c.Serve(ctx, l); done <- struct{}{} }()
 	go func() { c.Run(ctx); done <- struct{}{} }()
-	c.AddPeers(extra...)
+	c.AddPeers(o.peers...)
 	d := &discovery{
 		infoHash: t.InfoHash, peerID: c.PeerID(), trackers: t.Trackers(), port: port,
 		node: node, tc: newTrackerClient(), log: log,
@@ -189,8 +217,9 @@ func joinSwarm(ctx context.Context, t *torrent.Torrent, dir string, port uint16,
 }
 
 // resolveMagnet fetches a magnet link's metadata from peers found through its
-// trackers, the DHT and extra.
-func resolveMagnet(ctx context.Context, m *torrent.Magnet, port uint16, node *dht.Node, extra []string, log *slog.Logger) (*torrent.Torrent, error) {
+// trackers, the DHT and o.peers.
+func resolveMagnet(ctx context.Context, m *torrent.Magnet, o netOpts) (*torrent.Torrent, error) {
+	port, node, log, enc := o.port, o.node, o.log, o.enc
 	log.Info("fetching metadata", "info-hash", hex.EncodeToString(m.InfoHash[:]))
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -203,7 +232,7 @@ func resolveMagnet(ctx context.Context, m *torrent.Magnet, port uint16, node *dh
 			}
 		}
 	}
-	offer(extra)
+	offer(o.peers)
 	offer(m.Peers)
 	d := &discovery{
 		infoHash: m.InfoHash, peerID: engine.NewPeerID(), trackers: m.Trackers, port: port,
@@ -211,7 +240,7 @@ func resolveMagnet(ctx context.Context, m *torrent.Magnet, port uint16, node *dh
 	}
 	go d.run(ctx, offer)
 
-	info, err := engine.FetchMetadata(ctx, &transport.TCP{}, m.InfoHash, peers, log)
+	info, err := engine.FetchMetadata(ctx, &transport.TCP{}, m.InfoHash, peers, enc, log)
 	if err != nil {
 		return nil, err
 	}
@@ -227,30 +256,25 @@ func cmdGet(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	log := newLogger(*sf.verbose)
-	port := uint16(*sf.port)
-
-	var node *dht.Node
-	if !*sf.noDHT {
-		if node, err = startDHT(ctx, port, log); err != nil {
-			return fmt.Errorf("starting DHT: %w", err)
-		}
+	o, err := sf.open(ctx)
+	if err != nil {
+		return err
 	}
+	log := o.log
 
 	var t *torrent.Torrent
-	extra := sf.peers
 	if strings.HasPrefix(src, "magnet:") {
 		m, err := torrent.ParseMagnet(src)
 		if err != nil {
 			return err
 		}
-		if len(m.Trackers) == 0 && node == nil && len(m.Peers)+len(sf.peers) == 0 {
+		if len(m.Trackers) == 0 && o.node == nil && len(m.Peers)+len(o.peers) == 0 {
 			return errors.New("magnet link has no trackers or peers and the DHT is off")
 		}
-		if t, err = resolveMagnet(ctx, m, port, node, sf.peers, log); err != nil {
+		if t, err = resolveMagnet(ctx, m, o); err != nil {
 			return fmt.Errorf("fetching metadata: %w", err)
 		}
-		extra = append(extra, m.Peers...)
+		o.peers = append(o.peers, m.Peers...)
 		meta := append(append([]byte("d4:info"), t.InfoBytes...), 'e')
 		saved := filepath.Join(*dir, t.Name+".torrent")
 		if err := os.MkdirAll(*dir, 0o755); err == nil && os.WriteFile(saved, meta, 0o644) == nil {
@@ -260,7 +284,7 @@ func cmdGet(ctx context.Context, args []string) error {
 		return err
 	}
 
-	s, err := joinSwarm(ctx, t, *dir, port, node, extra, log)
+	s, err := joinSwarm(ctx, t, *dir, o)
 	if err != nil {
 		return err
 	}
@@ -277,8 +301,8 @@ func cmdGet(ctx context.Context, args []string) error {
 			return ctx.Err()
 		case <-tick.C:
 			st := s.c.Stats()
-			fmt.Fprintf(os.Stderr, "\r%d/%d pieces (%.1f%%), %d peers   ", st.Pieces, st.TotalPieces,
-				100*float64(t.Length-st.Left)/float64(t.Length), st.Peers)
+			fmt.Fprintf(os.Stderr, "\r%d/%d pieces (%.1f%%), %d peers (%d encrypted)   ", st.Pieces, st.TotalPieces,
+				100*float64(t.Length-st.Left)/float64(t.Length), st.Peers, st.EncryptedPeers)
 		}
 	}
 	fmt.Fprintln(os.Stderr)
@@ -298,19 +322,16 @@ func cmdSeed(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	log := newLogger(*sf.verbose)
 	t, err := loadTorrent(path)
 	if err != nil {
 		return err
 	}
-	port := uint16(*sf.port)
-	var node *dht.Node
-	if !*sf.noDHT {
-		if node, err = startDHT(ctx, port, log); err != nil {
-			return fmt.Errorf("starting DHT: %w", err)
-		}
+	o, err := sf.open(ctx)
+	if err != nil {
+		return err
 	}
-	s, err := joinSwarm(ctx, t, *dir, port, node, sf.peers, log)
+	log := o.log
+	s, err := joinSwarm(ctx, t, *dir, o)
 	if err != nil {
 		return err
 	}
