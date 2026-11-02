@@ -43,6 +43,7 @@ type Torrent struct {
 	Files        []File
 	MultiFile    bool
 	Private      bool
+	InfoBytes    []byte // the info dictionary exactly as encoded; its SHA-1 is InfoHash
 }
 
 // NumPieces returns the number of pieces.
@@ -92,7 +93,7 @@ func Parse(data []byte) (*Torrent, error) {
 		return nil, err
 	}
 
-	t := &Torrent{InfoHash: sha1.Sum(raw)}
+	t := &Torrent{InfoHash: sha1.Sum(raw), InfoBytes: append([]byte(nil), raw...)}
 	t.Announce, _ = root["announce"].(string)
 	if tiers, ok := root["announce-list"].([]any); ok {
 		for _, tier := range tiers {
@@ -113,6 +114,23 @@ func Parse(data []byte) (*Torrent, error) {
 	}
 	if err := t.parseInfo(info); err != nil {
 		return nil, err
+	}
+	return t, nil
+}
+
+// FromInfo builds a torrent from a bare info dictionary, as fetched from peers
+// for a magnet link (BEP 9). trackers become its single announce tier.
+func FromInfo(info []byte, trackers []string) (*Torrent, error) {
+	meta := make([]byte, 0, len(info)+8)
+	meta = append(meta, "d4:info"...)
+	meta = append(meta, info...)
+	meta = append(meta, 'e')
+	t, err := Parse(meta)
+	if err != nil {
+		return nil, err
+	}
+	if len(trackers) > 0 {
+		t.AnnounceList = [][]string{append([]string(nil), trackers...)}
 	}
 	return t, nil
 }

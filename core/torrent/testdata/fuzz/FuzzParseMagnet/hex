@@ -1,0 +1,2 @@
+go test fuzz v1
+string("magnet:?xt=urn:btih:c56b1130cc07ab836e30149199aede14b00b6855&dn=photos&x.pe=10.0.0.1:6881")
