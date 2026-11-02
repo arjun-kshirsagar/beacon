@@ -342,3 +342,61 @@ func mkdirWrite(path string, data []byte) error {
 	}
 	return os.WriteFile(path, data, 0o644)
 }
+
+// Like libtorrent, the seeder sends its extension handshake before its bitfield.
+func TestBitfieldAfterExtensionHandshake(t *testing.T) {
+	mem := transport.NewMemory()
+	src := t.TempDir()
+	tor := seedDir(t, src)
+	srcStore, err := OpenStorage(src, tor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srcStore.Close()
+
+	l, _ := mem.Listen("10.0.0.1:6881")
+	defer l.Close()
+	serveOne := func(conn net.Conn) {
+		defer conn.Close()
+		if _, err := peer.ReadHandshake(conn); err != nil {
+			return
+		}
+		h := peer.Handshake{InfoHash: tor.InfoHash, PeerID: NewPeerID()}
+		h.SetExtensions()
+		h.WriteTo(conn)
+		eh := peer.ExtHandshake{M: map[string]int{peer.ExtMetadata: 3}, MetadataSize: len(tor.InfoBytes)}
+		peer.WriteMessage(conn, peer.Extended(peer.ExtHandshakeID, eh.Encode()))
+		peer.WriteMessage(conn, &peer.Message{ID: peer.MsgBitfield, Payload: fullBitfield(tor.NumPieces())})
+		peer.WriteMessage(conn, &peer.Message{ID: peer.MsgUnchoke})
+		for {
+			m, err := peer.ReadMessage(conn, 1<<20)
+			if err != nil {
+				return
+			}
+			if m != nil && m.ID == peer.MsgRequest {
+				idx, begin, length, _ := peer.ParseRequest(m)
+				block := make([]byte, length)
+				srcStore.ReadAt(block, int64(idx)*tor.PieceLength+int64(begin))
+				peer.WriteMessage(conn, peer.Piece(idx, begin, block))
+			}
+		}
+	}
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go serveOne(conn)
+		}
+	}()
+
+	dst := t.TempDir()
+	c := newClient(t, tor, dst, mem)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := c.Download(ctx, []string{"10.0.0.1:6881"}); err != nil {
+		t.Fatal(err)
+	}
+	sameFiles(t, src, dst)
+}

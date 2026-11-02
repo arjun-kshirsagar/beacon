@@ -39,7 +39,7 @@ type peerConn struct {
 	// Guarded by Client.mu.
 	id             [20]byte
 	has            peer.Bitfield
-	gotMessage     bool
+	gotPieces      bool // a bitfield or have arrived; a later bitfield is invalid
 	peerChoking    bool
 	peerInterested bool
 	amChoking      bool
@@ -258,11 +258,6 @@ func (pc *peerConn) handle(m *peer.Message) error {
 		return nil
 	}
 	c := pc.c
-	c.mu.Lock()
-	first := !pc.gotMessage
-	pc.gotMessage = true
-	c.mu.Unlock()
-
 	switch m.ID {
 	case peer.MsgChoke:
 		c.mu.Lock()
@@ -294,6 +289,7 @@ func (pc *peerConn) handle(m *peer.Message) error {
 			return fmt.Errorf("%w: have for piece %d", peer.ErrMalformed, i)
 		}
 		c.mu.Lock()
+		pc.gotPieces = true
 		if !pc.has.Has(int(i)) {
 			pc.has.Set(int(i))
 			c.pk.avail[i]++
@@ -302,14 +298,18 @@ func (pc *peerConn) handle(m *peer.Message) error {
 		pc.fill()
 		c.mu.Unlock()
 	case peer.MsgBitfield:
-		if !first {
-			return fmt.Errorf("%w: bitfield after other messages", peer.ErrMalformed)
-		}
+		// The bitfield may follow an extension handshake (BEP 10 sends that
+		// first), but must come before any have.
 		bf, err := peer.ParseBitfield(m.Payload, c.t.NumPieces())
 		if err != nil {
 			return err
 		}
 		c.mu.Lock()
+		if pc.gotPieces {
+			c.mu.Unlock()
+			return fmt.Errorf("%w: bitfield after have or bitfield", peer.ErrMalformed)
+		}
+		pc.gotPieces = true
 		pc.has = bf
 		for i := range c.t.NumPieces() {
 			if bf.Has(i) {
