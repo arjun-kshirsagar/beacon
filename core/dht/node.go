@@ -68,6 +68,7 @@ type Node struct {
 	peers      map[ID]map[netip.AddrPort]time.Time
 	secret     [2][16]byte // current and previous token secrets
 	lastRotate time.Time
+	queryRate  map[netip.Addr]*bucket // per-IP limit on queries we answer
 }
 
 type call struct {
@@ -94,6 +95,7 @@ func New(cfg Config) (*Node, error) {
 		pending:    make(map[string]*call),
 		peers:      make(map[ID]map[netip.AddrPort]time.Time),
 		lastRotate: time.Now(),
+		queryRate:  make(map[netip.Addr]*bucket),
 	}
 	if n.id == (ID{}) {
 		n.id = RandomID()
@@ -151,7 +153,9 @@ func (n *Node) Run(ctx context.Context) error {
 			continue
 		}
 		if m.Y == "q" {
-			n.handleQuery(m, from, addr)
+			if n.allowQuery(addr.Addr()) {
+				n.handleQuery(m, from, addr)
+			}
 			continue
 		}
 		n.mu.Lock()

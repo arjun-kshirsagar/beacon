@@ -38,12 +38,16 @@ func (n *Node) lookup(ctx context.Context, target ID, getPeers bool) (*lookupRes
 	}
 
 	cands := map[ID]*candidate{}
+	perSubnet := map[[3]byte]int{}
 	var order []Contact
 	add := func(c Contact) {
 		if c.ID == n.id || len(cands) >= maxCandidates {
 			return
 		}
-		if _, ok := cands[c.ID]; !ok {
+		// Eclipse resistance: one /24 cannot fill the candidate list, however
+		// many close-looking IDs it hands out.
+		if _, ok := cands[c.ID]; !ok && perSubnet[subnet(c.Addr)] < maxPerSubnet {
+			perSubnet[subnet(c.Addr)]++
 			cands[c.ID] = &candidate{Contact: c}
 			order = append(order, c)
 		}
