@@ -34,6 +34,17 @@ func Decode(data []byte) (any, error) {
 	return v, nil
 }
 
+// DecodePrefix decodes the first bencoded value in data and returns it with the
+// number of bytes it occupied, allowing trailing data.
+func DecodePrefix(data []byte) (any, int, error) {
+	d := decoder{data: data}
+	v, err := d.value(0)
+	if err != nil {
+		return nil, 0, err
+	}
+	return v, d.pos, nil
+}
+
 // Raw returns the exact encoded bytes of key's value in the top-level dictionary
 // in data. It is used to hash a torrent's info dictionary as it appeared on disk.
 func Raw(data []byte, key string) ([]byte, error) {

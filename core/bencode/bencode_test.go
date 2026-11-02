@@ -142,3 +142,16 @@ func FuzzDecode(f *testing.F) {
 		Raw(data, "info")
 	})
 }
+
+func TestDecodePrefix(t *testing.T) {
+	v, n, err := DecodePrefix([]byte("d8:msg_typei1e5:piecei0eeRAWDATA"))
+	if err != nil || n != 25 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	if want := map[string]any{"msg_type": int64(1), "piece": int64(0)}; !reflect.DeepEqual(v, want) {
+		t.Fatalf("got %#v", v)
+	}
+	if _, _, err := DecodePrefix([]byte("d1:a")); !errors.Is(err, ErrSyntax) {
+		t.Fatalf("truncated: %v", err)
+	}
+}
