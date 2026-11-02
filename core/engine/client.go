@@ -58,6 +58,7 @@ type Config struct {
 	PeerID     [20]byte // zero picks a random ID
 	ListenPort uint16   // advertised to peers in the extension handshake
 	MaxConns   int      // zero means 50
+	Encryption Encryption
 	Logger     *slog.Logger
 }
 
@@ -70,6 +71,7 @@ type Client struct {
 	peerID   [20]byte
 	port     uint16
 	maxConns int
+	enc      Encryption
 	log      *slog.Logger
 	maxMsg   uint32
 	wake     chan struct{}
@@ -113,6 +115,7 @@ func New(t *torrent.Torrent, store *Storage, cfg Config) (*Client, error) {
 		peerID:   cfg.PeerID,
 		port:     cfg.ListenPort,
 		maxConns: cfg.MaxConns,
+		enc:      cfg.Encryption,
 		log:      cfg.Logger,
 		maxMsg:   uint32(max(1+len(have), 9+MaxBlockSize)),
 		wake:     make(chan struct{}, 1),
@@ -154,6 +157,7 @@ type Stats struct {
 	Downloaded, Uploaded int64
 	Left                 int64
 	Peers                int
+	EncryptedPeers       int
 }
 
 // Stats returns current progress.
@@ -163,6 +167,11 @@ func (c *Client) Stats() Stats {
 	s := Stats{
 		Pieces: c.pk.have.Count(), TotalPieces: c.t.NumPieces(),
 		Downloaded: c.downloaded, Uploaded: c.uploaded, Peers: len(c.conns),
+	}
+	for pc := range c.conns {
+		if pc.encrypted {
+			s.EncryptedPeers++
+		}
 	}
 	for i := range c.t.NumPieces() {
 		if !c.pk.have.Has(i) {
@@ -241,9 +250,7 @@ func (c *Client) Run(ctx context.Context) error {
 }
 
 func (c *Client) dial(ctx context.Context, addr string) error {
-	dctx, cancel := context.WithTimeout(ctx, dialTimeout)
-	conn, err := c.tr.Dial(dctx, addr)
-	cancel()
+	conn, encrypted, err := secureDial(ctx, c.tr, addr, c.t.InfoHash, c.enc)
 	if err != nil {
 		c.mu.Lock()
 		c.dialing--
@@ -251,7 +258,7 @@ func (c *Client) dial(ctx context.Context, addr string) error {
 		c.signal()
 		return err
 	}
-	return c.runConn(ctx, conn, addr, true)
+	return c.runConn(ctx, conn, addr, true, encrypted)
 }
 
 // Serve accepts peers on l until ctx is done.
@@ -280,7 +287,7 @@ func (c *Client) Serve(ctx context.Context, l net.Listener) error {
 			continue
 		}
 		wg.Go(func() {
-			if err := c.runConn(ctx, conn, addr, false); err != nil && ctx.Err() == nil {
+			if err := c.runConn(ctx, conn, addr, false, false); err != nil && ctx.Err() == nil {
 				c.log.Debug("peer connection ended", "peer", addr, "err", err)
 			}
 		})

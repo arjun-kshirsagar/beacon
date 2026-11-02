@@ -201,7 +201,9 @@ func poisoner(t *testing.T, tr transport.Transport, addr string, tor *torrent.To
 			}
 			go func() {
 				defer conn.Close()
-				peer.ReadHandshake(conn)
+				if _, err := peer.ReadHandshake(conn); err != nil {
+					return // plaintext-only peers hang up on MSE
+				}
 				peer.Handshake{InfoHash: tor.InfoHash}.WriteTo(conn)
 				all := peer.NewBitfield(tor.NumPieces())
 				for i := range tor.NumPieces() {

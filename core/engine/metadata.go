@@ -30,7 +30,7 @@ var (
 // metadata extension (BEP 9), trying several peers at once, and returns it once
 // its SHA-1 matches. It gives up with ErrNoMetadata when peers is closed and every
 // peer has failed.
-func FetchMetadata(ctx context.Context, tr transport.Transport, infoHash [20]byte, peers <-chan string, log *slog.Logger) ([]byte, error) {
+func FetchMetadata(ctx context.Context, tr transport.Transport, infoHash [20]byte, peers <-chan string, enc Encryption, log *slog.Logger) ([]byte, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
@@ -65,7 +65,7 @@ func FetchMetadata(ctx context.Context, tr transport.Transport, infoHash [20]byt
 					return
 				}
 				defer func() { <-sem }()
-				info, err := fetchMetadataFrom(ctx, tr, addr, infoHash, peerID)
+				info, err := fetchMetadataFrom(ctx, tr, addr, infoHash, peerID, enc)
 				if err != nil {
 					if ctx.Err() == nil {
 						log.Debug("metadata fetch failed", "peer", addr, "err", err)
@@ -100,10 +100,8 @@ func FetchMetadata(ctx context.Context, tr transport.Transport, infoHash [20]byt
 	}
 }
 
-func fetchMetadataFrom(ctx context.Context, tr transport.Transport, addr string, infoHash, peerID [20]byte) ([]byte, error) {
-	dctx, cancel := context.WithTimeout(ctx, dialTimeout)
-	conn, err := tr.Dial(dctx, addr)
-	cancel()
+func fetchMetadataFrom(ctx context.Context, tr transport.Transport, addr string, infoHash, peerID [20]byte, enc Encryption) ([]byte, error) {
+	conn, _, err := secureDial(ctx, tr, addr, infoHash, enc)
 	if err != nil {
 		return nil, err
 	}

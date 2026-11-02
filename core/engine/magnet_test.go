@@ -77,7 +77,7 @@ func TestMagnetOverDHT(t *testing.T) {
 	}
 	close(peers)
 
-	info, err := FetchMetadata(ctx, mem, magnet.InfoHash, peers, nil)
+	info, err := FetchMetadata(ctx, mem, magnet.InfoHash, peers, EncryptPrefer, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

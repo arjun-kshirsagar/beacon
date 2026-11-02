@@ -38,6 +38,7 @@ type peerConn struct {
 
 	// Guarded by Client.mu.
 	id             [20]byte
+	encrypted      bool // the stream is RC4-encrypted
 	has            peer.Bitfield
 	gotPieces      bool // a bitfield or have arrived; a later bitfield is invalid
 	peerChoking    bool
@@ -85,9 +86,10 @@ func (pc *peerConn) queueData(m *peer.Message) error {
 	}
 }
 
-// runConn handshakes on conn and serves it until it fails. The caller has
-// counted it in Client.dialing.
-func (c *Client) runConn(ctx context.Context, conn net.Conn, addr string, outgoing bool) error {
+// runConn handshakes on conn and serves it until it fails. Outgoing connections
+// have already been through secureDial; incoming ones go through secureAccept
+// here. The caller has counted the connection in Client.dialing.
+func (c *Client) runConn(ctx context.Context, conn net.Conn, addr string, outgoing, encrypted bool) error {
 	pc := &peerConn{
 		c:           c,
 		conn:        conn,
@@ -104,7 +106,18 @@ func (c *Client) runConn(ctx context.Context, conn net.Conn, addr string, outgoi
 	defer pc.close()
 	defer context.AfterFunc(ctx, pc.close)()
 
-	theirs, err := c.handshake(conn, outgoing)
+	var err error
+	if !outgoing {
+		conn, encrypted, err = secureAccept(conn, c.t.InfoHash, c.enc)
+		if conn != nil {
+			pc.conn = conn
+		}
+	}
+	pc.encrypted = encrypted
+	var theirs peer.Handshake
+	if err == nil {
+		theirs, err = c.handshake(conn, outgoing)
+	}
 	if err == nil {
 		err = c.register(pc, theirs)
 	}

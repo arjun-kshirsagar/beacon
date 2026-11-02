@@ -184,7 +184,9 @@ func staller(t *testing.T, tr transport.Transport, addr string, tor *torrent.Tor
 			}
 			go func() {
 				defer conn.Close()
-				peer.ReadHandshake(conn)
+				if _, err := peer.ReadHandshake(conn); err != nil {
+					return // plaintext-only peers hang up on MSE
+				}
 				peer.Handshake{InfoHash: tor.InfoHash, PeerID: NewPeerID()}.WriteTo(conn)
 				peer.WriteMessage(conn, &peer.Message{ID: peer.MsgBitfield, Payload: fullBitfield(tor.NumPieces())})
 				peer.WriteMessage(conn, &peer.Message{ID: peer.MsgUnchoke})
@@ -271,7 +273,7 @@ func TestFetchMetadata(t *testing.T) {
 	peers <- "10.0.0.1:6881"
 	peers <- "10.0.0.99:6881" // nobody there
 	close(peers)
-	info, err := FetchMetadata(context.Background(), mem, tor.InfoHash, peers, nil)
+	info, err := FetchMetadata(context.Background(), mem, tor.InfoHash, peers, EncryptPrefer, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +289,7 @@ func TestFetchMetadata(t *testing.T) {
 	only := make(chan string, 1)
 	only <- "10.0.0.66:6881"
 	close(only)
-	if _, err := FetchMetadata(context.Background(), mem, tor.InfoHash, only, nil); !errors.Is(err, ErrNoMetadata) {
+	if _, err := FetchMetadata(context.Background(), mem, tor.InfoHash, only, EncryptPrefer, nil); !errors.Is(err, ErrNoMetadata) {
 		t.Fatalf("liar only: got %v", err)
 	}
 }
@@ -312,7 +314,7 @@ func TestMetadataLargerThanOnePiece(t *testing.T) {
 	peers := make(chan string, 1)
 	peers <- "10.0.0.1:6881"
 	close(peers)
-	info, err := FetchMetadata(context.Background(), mem, tor.InfoHash, peers, nil)
+	info, err := FetchMetadata(context.Background(), mem, tor.InfoHash, peers, EncryptPrefer, nil)
 	if err != nil || !bytes.Equal(info, tor.InfoBytes) {
 		t.Fatalf("fetch: %v", err)
 	}
