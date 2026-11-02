@@ -28,6 +28,7 @@ core/               all protocol logic — pure Go, no platform code
   peer/             peer wire protocol
   tracker/          HTTP (BEP 3/23) and UDP (BEP 15) trackers
   dht/              Kademlia DHT (BEP 5)
+  lpd/              local peer discovery over multicast (BEP 14)
   engine/           piece picker, choking, endgame, storage
   mse/              BitTorrent Message Stream Encryption (obfuscation, not security)
   mesh/             mesh packets, TTL, dedup, fragmentation, store-and-forward
