@@ -217,7 +217,10 @@ func joinSwarm(ctx context.Context, t *torrent.Torrent, dir string, o netOpts) (
 			return st.Downloaded, st.Uploaded, st.Left
 		},
 	}
-	go func() { d.run(ctx, func(a []string) { c.AddPeers(a...) }); done <- struct{}{} }()
+	go func() {
+		d.run(ctx, func(src engine.PeerSource, a []string) { c.AddPeersFrom(src, a...) })
+		done <- struct{}{}
+	}()
 	log.Info("joined swarm", "name", t.Name, "port", port, "trackers", len(d.trackers),
 		"dht", node != nil, "lpd", local != nil, "private", t.Private)
 
@@ -238,16 +241,21 @@ func resolveMagnet(ctx context.Context, m *torrent.Magnet, o netOpts) (*torrent.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	peers := make(chan string, 1024)
-	offer := func(addrs []string) {
+	// The metadata phase dials peers too, so it applies the same address
+	// filter as the engine.
+	offer := func(src engine.PeerSource, addrs []string) {
 		for _, a := range addrs {
+			if !engine.AcceptPeerAddr(src, a, false) {
+				continue
+			}
 			select {
 			case peers <- a:
 			default:
 			}
 		}
 	}
-	offer(o.peers)
-	offer(m.Peers)
+	offer(engine.SourceManual, o.peers)
+	offer(engine.SourceManual, m.Peers)
 	d := &discovery{
 		infoHash: m.InfoHash, peerID: engine.NewPeerID(), trackers: m.Trackers, port: port,
 		node: node, lpd: o.lpd, tc: newTrackerClient(), log: log,

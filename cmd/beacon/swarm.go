@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/arjun-kshirsagar/beacon/core/dht"
+	"github.com/arjun-kshirsagar/beacon/core/engine"
 	"github.com/arjun-kshirsagar/beacon/core/lpd"
 	"github.com/arjun-kshirsagar/beacon/core/tracker"
 	"github.com/arjun-kshirsagar/beacon/core/transport"
@@ -61,16 +62,19 @@ func startDHT(ctx context.Context, port uint16, log *slog.Logger) (*dht.Node, er
 	return n, nil
 }
 
+// foundFunc receives peer addresses and where they came from.
+type foundFunc func(src engine.PeerSource, addrs []string)
+
 // round announces once to every source and passes the peers found to found.
 // It returns how long to wait before the next round.
-func (d *discovery) round(ctx context.Context, ev tracker.Event, found func([]string)) time.Duration {
+func (d *discovery) round(ctx context.Context, ev tracker.Event, found foundFunc) time.Duration {
 	req := tracker.Request{InfoHash: d.infoHash, PeerID: d.peerID, Port: d.port, Event: ev, Left: 1 << 30}
 	if d.progress != nil {
 		req.Downloaded, req.Uploaded, req.Left = d.progress()
 	}
 	var mu sync.Mutex
 	wait, total := rediscover, 0
-	report := func(ps []netip.AddrPort) {
+	report := func(src engine.PeerSource, ps []netip.AddrPort) {
 		addrs := make([]string, len(ps))
 		for i, p := range ps {
 			addrs[i] = p.String()
@@ -79,7 +83,7 @@ func (d *discovery) round(ctx context.Context, ev tracker.Event, found func([]st
 		total += len(addrs)
 		mu.Unlock()
 		if len(addrs) > 0 {
-			found(addrs)
+			found(src, addrs)
 		}
 	}
 
@@ -95,7 +99,7 @@ func (d *discovery) round(ctx context.Context, ev tracker.Event, found func([]st
 			mu.Lock()
 			wait = min(wait, resp.Interval)
 			mu.Unlock()
-			report(resp.Peers)
+			report(engine.SourceTracker, resp.Peers)
 		})
 	}
 	if d.lpd != nil && ev != tracker.EventStopped {
@@ -111,7 +115,7 @@ func (d *discovery) round(ctx context.Context, ev tracker.Event, found func([]st
 				d.log.Debug("DHT announce", "err", err)
 			}
 			d.log.Debug("DHT answered", "peers", len(ps))
-			report(ps)
+			report(engine.SourceDHT, ps)
 		})
 	}
 	wg.Wait()
@@ -122,7 +126,7 @@ func (d *discovery) round(ctx context.Context, ev tracker.Event, found func([]st
 }
 
 // run repeats discovery rounds until ctx is done, then tells trackers we left.
-func (d *discovery) run(ctx context.Context, found func([]string)) {
+func (d *discovery) run(ctx context.Context, found foundFunc) {
 	if d.lpd != nil {
 		d.lpd.route(d.infoHash, found)
 		defer d.lpd.unroute(d.infoHash)
@@ -135,7 +139,7 @@ func (d *discovery) run(ctx context.Context, found func([]string)) {
 		case <-time.After(wait):
 		case <-ctx.Done():
 			sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			d.round(sctx, tracker.EventStopped, func([]string) {})
+			d.round(sctx, tracker.EventStopped, func(engine.PeerSource, []string) {})
 			cancel()
 			return
 		}
@@ -147,7 +151,7 @@ func (d *discovery) run(ctx context.Context, found func([]string)) {
 type lpdRouter struct {
 	s      *lpd.Service
 	mu     sync.Mutex
-	routes map[[20]byte]func([]string)
+	routes map[[20]byte]foundFunc
 }
 
 // startLPD joins the BEP 14 multicast group on the local network.
@@ -156,20 +160,20 @@ func startLPD(ctx context.Context, log *slog.Logger) (*lpdRouter, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &lpdRouter{s: s, routes: make(map[[20]byte]func([]string))}
+	r := &lpdRouter{s: s, routes: make(map[[20]byte]foundFunc)}
 	go s.Run(ctx, func(ih [20]byte, p netip.AddrPort) {
 		r.mu.Lock()
 		fn := r.routes[ih]
 		r.mu.Unlock()
 		if fn != nil {
 			log.Debug("LPD found peer", "peer", p)
-			fn([]string{p.String()})
+			fn(engine.SourceLPD, []string{p.String()})
 		}
 	})
 	return r, nil
 }
 
-func (r *lpdRouter) route(ih [20]byte, fn func([]string)) {
+func (r *lpdRouter) route(ih [20]byte, fn foundFunc) {
 	r.mu.Lock()
 	r.routes[ih] = fn
 	r.mu.Unlock()
