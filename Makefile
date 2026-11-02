@@ -1,4 +1,4 @@
-.PHONY: build run test race vet fmt check
+.PHONY: build run test race vet fmt check fuzz
 
 build:
 	go build -o bin/beacon ./cmd/beacon
@@ -19,3 +19,7 @@ fmt:
 	gofmt -l -w .
 
 check: vet race
+
+# Run every fuzz target; override the per-target time with FUZZTIME=10m.
+fuzz:
+	./scripts/fuzz.sh
