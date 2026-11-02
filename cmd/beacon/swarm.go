@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/arjun-kshirsagar/beacon/core/dht"
+	"github.com/arjun-kshirsagar/beacon/core/lpd"
 	"github.com/arjun-kshirsagar/beacon/core/tracker"
 	"github.com/arjun-kshirsagar/beacon/core/transport"
 )
@@ -17,14 +18,15 @@ const (
 	rediscover    = 5 * time.Minute
 )
 
-// discovery finds peers for one info-hash through trackers and the DHT and
-// announces that we are in the swarm.
+// discovery finds peers for one info-hash through trackers, the DHT and local
+// discovery, and announces that we are in the swarm.
 type discovery struct {
 	infoHash [20]byte
 	peerID   [20]byte
 	trackers []string
 	port     uint16
-	node     *dht.Node // nil when the DHT is off
+	node     *dht.Node  // nil when the DHT is off
+	lpd      *lpdRouter // nil when local discovery is off
 	tc       *tracker.Client
 	log      *slog.Logger
 	// progress reports bytes downloaded, uploaded and left; nil before the
@@ -96,6 +98,12 @@ func (d *discovery) round(ctx context.Context, ev tracker.Event, found func([]st
 			report(resp.Peers)
 		})
 	}
+	if d.lpd != nil && ev != tracker.EventStopped {
+		// Rate-limited inside the service; answers arrive through the router.
+		if err := d.lpd.s.Announce(d.port, d.infoHash); err != nil {
+			d.log.Debug("LPD announce", "err", err)
+		}
+	}
 	if d.node != nil && ev != tracker.EventStopped {
 		wg.Go(func() {
 			ps, err := d.node.Announce(ctx, d.infoHash, d.port)
@@ -115,6 +123,10 @@ func (d *discovery) round(ctx context.Context, ev tracker.Event, found func([]st
 
 // run repeats discovery rounds until ctx is done, then tells trackers we left.
 func (d *discovery) run(ctx context.Context, found func([]string)) {
+	if d.lpd != nil {
+		d.lpd.route(d.infoHash, found)
+		defer d.lpd.unroute(d.infoHash)
+	}
 	ev := tracker.EventStarted
 	for {
 		wait := d.round(ctx, ev, found)
@@ -128,4 +140,43 @@ func (d *discovery) run(ctx context.Context, found func([]string)) {
 			return
 		}
 	}
+}
+
+// lpdRouter shares one local discovery socket among swarms, handing each
+// announcement to the swarm for its info-hash.
+type lpdRouter struct {
+	s      *lpd.Service
+	mu     sync.Mutex
+	routes map[[20]byte]func([]string)
+}
+
+// startLPD joins the BEP 14 multicast group on the local network.
+func startLPD(ctx context.Context, log *slog.Logger) (*lpdRouter, error) {
+	s, err := lpd.New(lpd.Config{Transport: transport.UDP{}, Logger: log})
+	if err != nil {
+		return nil, err
+	}
+	r := &lpdRouter{s: s, routes: make(map[[20]byte]func([]string))}
+	go s.Run(ctx, func(ih [20]byte, p netip.AddrPort) {
+		r.mu.Lock()
+		fn := r.routes[ih]
+		r.mu.Unlock()
+		if fn != nil {
+			log.Debug("LPD found peer", "peer", p)
+			fn([]string{p.String()})
+		}
+	})
+	return r, nil
+}
+
+func (r *lpdRouter) route(ih [20]byte, fn func([]string)) {
+	r.mu.Lock()
+	r.routes[ih] = fn
+	r.mu.Unlock()
+}
+
+func (r *lpdRouter) unroute(ih [20]byte) {
+	r.mu.Lock()
+	delete(r.routes, ih)
+	r.mu.Unlock()
 }

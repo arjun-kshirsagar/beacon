@@ -122,6 +122,7 @@ func newLogger(verbose bool) *slog.Logger {
 type swarmFlags struct {
 	port       *uint
 	noDHT      *bool
+	noLPD      *bool
 	verbose    *bool
 	encryption *string
 	peers      stringList
@@ -131,6 +132,7 @@ func addSwarmFlags(fs *flag.FlagSet) *swarmFlags {
 	sf := &swarmFlags{
 		port:    fs.Uint("port", 6881, "TCP port for peers and UDP port for the DHT"),
 		noDHT:   fs.Bool("no-dht", false, "do not use the DHT"),
+		noLPD:   fs.Bool("no-lpd", false, "do not discover peers on the local network"),
 		verbose: fs.Bool("v", false, "verbose logging"),
 		encryption: fs.String("encryption", "prefer",
 			"peer encryption (MSE): prefer, require, or off"),
@@ -142,13 +144,15 @@ func addSwarmFlags(fs *flag.FlagSet) *swarmFlags {
 // netOpts is what get and seed need to reach peers.
 type netOpts struct {
 	port  uint16
-	node  *dht.Node // nil when the DHT is off
-	peers []string  // extra peers to try
+	node  *dht.Node  // nil when the DHT is off
+	lpd   *lpdRouter // nil when local discovery is off
+	peers []string   // extra peers to try
 	enc   engine.Encryption
 	log   *slog.Logger
 }
 
-// open turns parsed flags into netOpts, starting the DHT unless it is off.
+// open turns parsed flags into netOpts, starting the DHT and local discovery
+// unless they are off. Local discovery failing to start is not fatal.
 func (sf *swarmFlags) open(ctx context.Context) (netOpts, error) {
 	o := netOpts{port: uint16(*sf.port), peers: sf.peers, log: newLogger(*sf.verbose)}
 	var err error
@@ -158,6 +162,11 @@ func (sf *swarmFlags) open(ctx context.Context) (netOpts, error) {
 	if !*sf.noDHT {
 		if o.node, err = startDHT(ctx, o.port, o.log); err != nil {
 			return o, fmt.Errorf("starting DHT: %w", err)
+		}
+	}
+	if !*sf.noLPD {
+		if o.lpd, err = startLPD(ctx, o.log); err != nil {
+			o.log.Warn("local peer discovery unavailable", "err", err)
 		}
 	}
 	return o, nil
@@ -173,7 +182,11 @@ type swarm struct {
 // joinSwarm opens storage for t under dir, starts accepting peers, and starts
 // discovering peers through trackers, the DHT and the given addresses.
 func joinSwarm(ctx context.Context, t *torrent.Torrent, dir string, o netOpts) (*swarm, error) {
-	port, node, log := o.port, o.node, o.log
+	port, node, local, log := o.port, o.node, o.lpd, o.log
+	if t.Private {
+		// BEP 27: a private torrent's peers come from its trackers only.
+		node, local = nil, nil
+	}
 	tr := &transport.TCP{}
 	l, err := tr.Listen(fmt.Sprintf(":%d", port))
 	if err != nil {
@@ -198,14 +211,15 @@ func joinSwarm(ctx context.Context, t *torrent.Torrent, dir string, o netOpts) (
 	c.AddPeers(o.peers...)
 	d := &discovery{
 		infoHash: t.InfoHash, peerID: c.PeerID(), trackers: t.Trackers(), port: port,
-		node: node, tc: newTrackerClient(), log: log,
+		node: node, lpd: local, tc: newTrackerClient(), log: log,
 		progress: func() (int64, int64, int64) {
 			st := c.Stats()
 			return st.Downloaded, st.Uploaded, st.Left
 		},
 	}
 	go func() { d.run(ctx, func(a []string) { c.AddPeers(a...) }); done <- struct{}{} }()
-	log.Info("joined swarm", "name", t.Name, "port", port, "trackers", len(d.trackers), "dht", node != nil)
+	log.Info("joined swarm", "name", t.Name, "port", port, "trackers", len(d.trackers),
+		"dht", node != nil, "lpd", local != nil, "private", t.Private)
 
 	return &swarm{t: t, c: c, stop: func() {
 		cancel()
@@ -236,7 +250,7 @@ func resolveMagnet(ctx context.Context, m *torrent.Magnet, o netOpts) (*torrent.
 	offer(m.Peers)
 	d := &discovery{
 		infoHash: m.InfoHash, peerID: engine.NewPeerID(), trackers: m.Trackers, port: port,
-		node: node, tc: newTrackerClient(), log: log,
+		node: node, lpd: o.lpd, tc: newTrackerClient(), log: log,
 	}
 	go d.run(ctx, offer)
 
