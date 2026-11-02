@@ -74,8 +74,8 @@ func NewHTTPClient(t transport.Transport) *http.Client {
 	}
 }
 
-// Announce sends req to the HTTP tracker at announceURL.
-func Announce(ctx context.Context, client *http.Client, announceURL string, req Request) (*Response, error) {
+// AnnounceHTTP sends req to the HTTP tracker at announceURL.
+func AnnounceHTTP(ctx context.Context, client *http.Client, announceURL string, req Request) (*Response, error) {
 	u, err := url.Parse(announceURL)
 	if err != nil {
 		return nil, fmt.Errorf("tracker: %w", err)

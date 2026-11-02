@@ -105,7 +105,7 @@ func TestAnnounce(t *testing.T) {
 	go srv.Serve(l)
 	defer srv.Close()
 
-	resp, err := Announce(context.Background(), NewHTTPClient(net), "http://tracker/announce?passkey=secret", req)
+	resp, err := AnnounceHTTP(context.Background(), NewHTTPClient(net), "http://tracker/announce?passkey=secret", req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,10 +114,10 @@ func TestAnnounce(t *testing.T) {
 		t.Fatalf("got %+v, want %+v", resp, want)
 	}
 
-	if _, err := Announce(context.Background(), NewHTTPClient(net), "udp://tracker:80", req); !errors.Is(err, ErrUnsupported) {
+	if _, err := AnnounceHTTP(context.Background(), NewHTTPClient(net), "udp://tracker:80", req); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("udp: got %v", err)
 	}
-	if _, err := Announce(context.Background(), NewHTTPClient(net), "http://tracker/missing", req); !errors.Is(err, ErrBadResponse) {
+	if _, err := AnnounceHTTP(context.Background(), NewHTTPClient(net), "http://tracker/missing", req); !errors.Is(err, ErrBadResponse) {
 		t.Fatalf("404: got %v", err)
 	}
 }
