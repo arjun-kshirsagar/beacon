@@ -7,16 +7,14 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/arjun-kshirsagar/beacon/core/dht"
 	"github.com/arjun-kshirsagar/beacon/core/engine"
 	"github.com/arjun-kshirsagar/beacon/core/torrent"
-	"github.com/arjun-kshirsagar/beacon/core/tracker"
 	"github.com/arjun-kshirsagar/beacon/core/transport"
 )
 
@@ -70,7 +68,8 @@ func cmdCreate(args []string) error {
 	if err := os.WriteFile(*out, meta, 0o644); err != nil {
 		return err
 	}
-	fmt.Printf("wrote %s\ninfo-hash %s\n", *out, hex.EncodeToString(t.InfoHash[:]))
+	m := torrent.Magnet{InfoHash: t.InfoHash, Name: t.Name, Trackers: t.Trackers()}
+	fmt.Printf("wrote %s\ninfo-hash %s\nmagnet   %s\n", *out, hex.EncodeToString(t.InfoHash[:]), m.String())
 	return nil
 }
 
@@ -119,160 +118,213 @@ func newLogger(verbose bool) *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 }
 
-// openClient opens storage for the torrent at path under dir and hashes it.
-func openClient(path, dir string, tr transport.Transport, log *slog.Logger) (*torrent.Torrent, *engine.Client, func(), error) {
-	t, err := loadTorrent(path)
+// swarmFlags are shared by get and seed.
+type swarmFlags struct {
+	port    *uint
+	noDHT   *bool
+	verbose *bool
+	peers   stringList
+}
+
+func addSwarmFlags(fs *flag.FlagSet) *swarmFlags {
+	sf := &swarmFlags{
+		port:    fs.Uint("port", 6881, "TCP port for peers and UDP port for the DHT"),
+		noDHT:   fs.Bool("no-dht", false, "do not use the DHT"),
+		verbose: fs.Bool("v", false, "verbose logging"),
+	}
+	fs.Var(&sf.peers, "peer", "peer host:port to connect to (repeatable)")
+	return sf
+}
+
+// swarm is a running client with its listener, DHT node and peer discovery.
+type swarm struct {
+	t    *torrent.Torrent
+	c    *engine.Client
+	stop func()
+}
+
+// joinSwarm opens storage for t under dir, starts accepting peers, and starts
+// discovering peers through trackers, the DHT and the given addresses.
+func joinSwarm(ctx context.Context, t *torrent.Torrent, dir string, port uint16, node *dht.Node, extra []string, log *slog.Logger) (*swarm, error) {
+	tr := &transport.TCP{}
+	l, err := tr.Listen(fmt.Sprintf(":%d", port))
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	store, err := engine.OpenStorage(dir, t)
 	if err != nil {
-		return nil, nil, nil, err
+		l.Close()
+		return nil, err
 	}
-	c, err := engine.New(t, store, engine.Config{Transport: tr, Logger: log})
+	c, err := engine.New(t, store, engine.Config{Transport: tr, ListenPort: port, Logger: log})
 	if err != nil {
+		l.Close()
 		store.Close()
-		return nil, nil, nil, err
+		return nil, err
 	}
-	return t, c, func() { store.Close() }, nil
+
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{}, 3)
+	go func() { c.Serve(ctx, l); done <- struct{}{} }()
+	go func() { c.Run(ctx); done <- struct{}{} }()
+	c.AddPeers(extra...)
+	d := &discovery{
+		infoHash: t.InfoHash, peerID: c.PeerID(), trackers: t.Trackers(), port: port,
+		node: node, tc: newTrackerClient(), log: log,
+		progress: func() (int64, int64, int64) {
+			st := c.Stats()
+			return st.Downloaded, st.Uploaded, st.Left
+		},
+	}
+	go func() { d.run(ctx, func(a []string) { c.AddPeers(a...) }); done <- struct{}{} }()
+	log.Info("joined swarm", "name", t.Name, "port", port, "trackers", len(d.trackers), "dht", node != nil)
+
+	return &swarm{t: t, c: c, stop: func() {
+		cancel()
+		for range 3 {
+			<-done
+		}
+		store.Close()
+	}}, nil
 }
 
-// announce asks every HTTP tracker of t for peers and returns their addresses.
-func announce(ctx context.Context, t *torrent.Torrent, c *engine.Client, tr transport.Transport, port uint16, ev tracker.Event, log *slog.Logger) ([]string, time.Duration) {
-	client := tracker.NewHTTPClient(tr)
-	st := c.Stats()
-	req := tracker.Request{
-		InfoHash: t.InfoHash, PeerID: c.PeerID(), Port: port,
-		Downloaded: st.Downloaded, Uploaded: st.Uploaded, Left: st.Left, Event: ev,
-	}
-	interval := tracker.DefaultInterval
-	seen := map[string]bool{}
-	var peers []string
-	for _, u := range t.Trackers() {
-		resp, err := tracker.Announce(ctx, client, u, req)
-		if err != nil {
-			log.Warn("announce failed", "tracker", u, "err", err)
-			continue
-		}
-		interval = min(interval, resp.Interval)
-		for _, p := range resp.Peers {
-			if s := p.String(); !seen[s] {
-				seen[s] = true
-				peers = append(peers, s)
+// resolveMagnet fetches a magnet link's metadata from peers found through its
+// trackers, the DHT and extra.
+func resolveMagnet(ctx context.Context, m *torrent.Magnet, port uint16, node *dht.Node, extra []string, log *slog.Logger) (*torrent.Torrent, error) {
+	log.Info("fetching metadata", "info-hash", hex.EncodeToString(m.InfoHash[:]))
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	peers := make(chan string, 1024)
+	offer := func(addrs []string) {
+		for _, a := range addrs {
+			select {
+			case peers <- a:
+			default:
 			}
 		}
 	}
-	return peers, interval
+	offer(extra)
+	offer(m.Peers)
+	d := &discovery{
+		infoHash: m.InfoHash, peerID: engine.NewPeerID(), trackers: m.Trackers, port: port,
+		node: node, tc: newTrackerClient(), log: log,
+	}
+	go d.run(ctx, offer)
+
+	info, err := engine.FetchMetadata(ctx, &transport.TCP{}, m.InfoHash, peers, log)
+	if err != nil {
+		return nil, err
+	}
+	return torrent.FromInfo(info, m.Trackers)
 }
 
 func cmdGet(ctx context.Context, args []string) error {
-	fs := newFlags("get", "<file.torrent>")
+	fs := newFlags("get", "<file.torrent | magnet-link>")
 	dir := fs.String("o", ".", "directory to download into")
-	port := fs.Uint("port", 6881, "port to report to trackers")
-	verbose := fs.Bool("v", false, "verbose logging")
-	var peerAddrs stringList
-	fs.Var(&peerAddrs, "peer", "peer host:port to connect to (repeatable)")
-	path, err := parseArgs(fs, args)
+	keepSeeding := fs.Bool("seed", false, "keep seeding after the download completes")
+	sf := addSwarmFlags(fs)
+	src, err := parseArgs(fs, args)
 	if err != nil {
 		return err
 	}
-	log := newLogger(*verbose)
-	tr := &transport.TCP{}
-	t, c, closeStore, err := openClient(path, *dir, tr, log)
-	if err != nil {
-		return err
-	}
-	defer closeStore()
+	log := newLogger(*sf.verbose)
+	port := uint16(*sf.port)
 
-	select {
-	case <-c.Done():
-		fmt.Println("already complete")
-		return nil
-	default:
-	}
-
-	peers := append([]string(nil), peerAddrs...)
-	found, _ := announce(ctx, t, c, tr, uint16(*port), tracker.EventStarted, log)
-	peers = append(peers, found...)
-	if len(peers) == 0 {
-		return errors.New("no peers: the torrent has no reachable HTTP tracker; pass -peer host:port")
-	}
-	log.Info("starting download", "name", t.Name, "peers", len(peers))
-
-	stopProgress := make(chan struct{})
-	go func() {
-		tick := time.NewTicker(time.Second)
-		defer tick.Stop()
-		for {
-			select {
-			case <-tick.C:
-				st := c.Stats()
-				fmt.Fprintf(os.Stderr, "\r%d/%d pieces (%.1f%%)", st.Pieces, st.TotalPieces,
-					100*float64(t.Length-st.Left)/float64(t.Length))
-			case <-stopProgress:
-				return
-			}
+	var node *dht.Node
+	if !*sf.noDHT {
+		if node, err = startDHT(ctx, port, log); err != nil {
+			return fmt.Errorf("starting DHT: %w", err)
 		}
-	}()
-	err = c.Download(ctx, peers)
-	close(stopProgress)
-	fmt.Fprintln(os.Stderr)
+	}
+
+	var t *torrent.Torrent
+	extra := sf.peers
+	if strings.HasPrefix(src, "magnet:") {
+		m, err := torrent.ParseMagnet(src)
+		if err != nil {
+			return err
+		}
+		if len(m.Trackers) == 0 && node == nil && len(m.Peers)+len(sf.peers) == 0 {
+			return errors.New("magnet link has no trackers or peers and the DHT is off")
+		}
+		if t, err = resolveMagnet(ctx, m, port, node, sf.peers, log); err != nil {
+			return fmt.Errorf("fetching metadata: %w", err)
+		}
+		extra = append(extra, m.Peers...)
+		meta := append(append([]byte("d4:info"), t.InfoBytes...), 'e')
+		saved := filepath.Join(*dir, t.Name+".torrent")
+		if err := os.MkdirAll(*dir, 0o755); err == nil && os.WriteFile(saved, meta, 0o644) == nil {
+			log.Info("saved metadata", "file", saved)
+		}
+	} else if t, err = loadTorrent(src); err != nil {
+		return err
+	}
+
+	s, err := joinSwarm(ctx, t, *dir, port, node, extra, log)
 	if err != nil {
 		return err
 	}
-	announce(ctx, t, c, tr, uint16(*port), tracker.EventCompleted, log)
+	defer s.stop()
+
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	for done := false; !done; {
+		select {
+		case <-s.c.Done():
+			done = true
+		case <-ctx.Done():
+			fmt.Fprintln(os.Stderr)
+			return ctx.Err()
+		case <-tick.C:
+			st := s.c.Stats()
+			fmt.Fprintf(os.Stderr, "\r%d/%d pieces (%.1f%%), %d peers   ", st.Pieces, st.TotalPieces,
+				100*float64(t.Length-st.Left)/float64(t.Length), st.Peers)
+		}
+	}
+	fmt.Fprintln(os.Stderr)
 	fmt.Printf("downloaded and verified %s\n", t.Name)
+	if *keepSeeding {
+		log.Info("seeding; press Ctrl-C to stop")
+		<-ctx.Done()
+	}
 	return nil
 }
 
 func cmdSeed(ctx context.Context, args []string) error {
 	fs := newFlags("seed", "<file.torrent>")
 	dir := fs.String("dir", ".", "directory that contains the torrent's data")
-	listen := fs.String("listen", ":6881", "address to accept peers on")
-	verbose := fs.Bool("v", false, "verbose logging")
+	sf := addSwarmFlags(fs)
 	path, err := parseArgs(fs, args)
 	if err != nil {
 		return err
 	}
-	log := newLogger(*verbose)
-	tr := &transport.TCP{}
-	t, c, closeStore, err := openClient(path, *dir, tr, log)
+	log := newLogger(*sf.verbose)
+	t, err := loadTorrent(path)
 	if err != nil {
 		return err
 	}
-	defer closeStore()
+	port := uint16(*sf.port)
+	var node *dht.Node
+	if !*sf.noDHT {
+		if node, err = startDHT(ctx, port, log); err != nil {
+			return fmt.Errorf("starting DHT: %w", err)
+		}
+	}
+	s, err := joinSwarm(ctx, t, *dir, port, node, sf.peers, log)
+	if err != nil {
+		return err
+	}
+	defer s.stop()
 	select {
-	case <-c.Done():
+	case <-s.c.Done():
 	default:
-		st := c.Stats()
+		st := s.c.Stats()
 		return fmt.Errorf("data in %s is incomplete (%d/%d pieces verified)", *dir, st.Pieces, st.TotalPieces)
 	}
-
-	l, err := tr.Listen(*listen)
-	if err != nil {
-		return err
-	}
-	_, portStr, _ := net.SplitHostPort(l.Addr().String())
-	port, _ := strconv.Atoi(portStr)
-	log.Info("seeding", "name", t.Name, "addr", l.Addr().String())
-
-	go func() {
-		ev := tracker.EventStarted
-		for {
-			_, interval := announce(ctx, t, c, tr, uint16(port), ev, log)
-			ev = tracker.EventNone
-			select {
-			case <-time.After(interval):
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
-	err = c.Serve(ctx, l)
-	// Tell trackers we are leaving; ctx is already cancelled, so use a fresh one.
-	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	announce(sctx, t, c, tr, uint16(port), tracker.EventStopped, log)
-	return err
+	m := torrent.Magnet{InfoHash: t.InfoHash, Name: t.Name, Trackers: t.Trackers()}
+	log.Info("seeding; press Ctrl-C to stop", "magnet", m.String())
+	<-ctx.Done()
+	st := s.c.Stats()
+	log.Info("stopped", "uploaded", st.Uploaded)
+	return nil
 }

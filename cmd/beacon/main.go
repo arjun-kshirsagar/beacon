@@ -17,7 +17,7 @@ Usage:
 Commands:
   create    make a .torrent from a file or directory
   info      show what a .torrent contains
-  get       download a torrent
+  get       download a .torrent or magnet link, seeding while it downloads
   seed      upload a complete torrent to other peers
   version   print the version
 
