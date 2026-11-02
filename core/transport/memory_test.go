@@ -130,3 +130,32 @@ func TestMemoryPackets(t *testing.T) {
 		t.Fatalf("got %v, want ErrClosed", err)
 	}
 }
+
+func TestMemoryMulticast(t *testing.T) {
+	m := NewMemory()
+	const group = "239.192.152.143:6771"
+	a, err := m.MulticastFrom("10.0.0.1").ListenMulticast(group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, _ := m.MulticastFrom("10.0.0.2").ListenMulticast(group)
+	defer b.Close()
+
+	dst, _ := m.ResolveAddr(context.Background(), group)
+	a.WriteTo([]byte("hi"), dst)
+	for _, c := range []net.PacketConn{a, b} { // the sender hears itself, like loopback
+		c.SetReadDeadline(time.Now().Add(time.Second))
+		buf := make([]byte, 8)
+		n, from, err := c.ReadFrom(buf)
+		if err != nil || string(buf[:n]) != "hi" || from.String() != "10.0.0.1:6771" {
+			t.Fatalf("got %q from %v, %v", buf[:n], from, err)
+		}
+	}
+	b.Close()
+	a.WriteTo([]byte("again"), dst) // closed members are gone from the group
+	a.SetReadDeadline(time.Now().Add(time.Second))
+	if _, _, err := a.ReadFrom(make([]byte, 8)); err != nil {
+		t.Fatal(err)
+	}
+}

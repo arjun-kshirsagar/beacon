@@ -23,6 +23,7 @@ type Memory struct {
 	mu        sync.Mutex
 	listeners map[string]*memListener
 	packets   map[string]*memPacketConn
+	groups    map[string]map[*memPacketConn]bool // multicast group → members
 	next      int
 }
 
@@ -54,10 +55,34 @@ func (m *Memory) Listen(addr string) (net.Listener, error) {
 
 // Dial connects to a listener registered with Listen.
 func (m *Memory) Dial(ctx context.Context, addr string) (net.Conn, error) {
+	return m.dial(ctx, addr, "")
+}
+
+// From returns a Transport whose outgoing connections come from ip, with a
+// fresh port each, as a host on a real network would. Listen is unchanged.
+func (m *Memory) From(ip string) Transport {
+	return memSource{m: m, ip: ip}
+}
+
+type memSource struct {
+	m  *Memory
+	ip string
+}
+
+func (s memSource) Dial(ctx context.Context, addr string) (net.Conn, error) {
+	return s.m.dial(ctx, addr, s.ip)
+}
+
+func (s memSource) Listen(addr string) (net.Listener, error) { return s.m.Listen(addr) }
+
+func (m *Memory) dial(ctx context.Context, addr, ip string) (net.Conn, error) {
 	m.mu.Lock()
 	l, ok := m.listeners[addr]
 	m.next++
 	local := memAddr(fmt.Sprintf("mem-client-%d", m.next))
+	if ip != "" {
+		local = memAddr(net.JoinHostPort(ip, fmt.Sprint(40000+m.next%20000)))
+	}
 	m.mu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("dial %s: %w", addr, ErrConnRefused)
