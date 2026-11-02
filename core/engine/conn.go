@@ -22,6 +22,8 @@ var (
 	errSelf      = errors.New("engine: connected to ourselves")
 	errDuplicate = errors.New("engine: already connected to this peer")
 	errSnubbed   = errors.New("engine: peer stopped sending requested blocks")
+	errFlood     = errors.New("engine: peer exceeded the message rate limit")
+	errPerIP     = errors.New("engine: too many connections from this IP")
 	errClosed    = errors.New("engine: connection closed")
 )
 
@@ -57,6 +59,10 @@ type peerConn struct {
 	listenAddr     string          // where others can reach this peer; "" if unknown
 	pexSent        map[string]bool // addresses we have told this peer about
 	lastPEXIn      time.Time
+
+	// Message rate limiter; used only by the connection's handler goroutine.
+	tokens   float64
+	lastFill time.Time
 }
 
 func (pc *peerConn) close() {
@@ -148,9 +154,11 @@ func (c *Client) runConn(ctx context.Context, conn net.Conn, addr string, outgoi
 		select {
 		case m := <-msgs:
 			if err := pc.handle(m); err != nil {
+				c.reportErr(pc.key, err)
 				return err
 			}
 		case err := <-errc:
+			c.reportErr(pc.key, err)
 			return err
 		case <-pc.closed:
 			return errClosed
@@ -159,6 +167,7 @@ func (c *Client) runConn(ctx context.Context, conn net.Conn, addr string, outgoi
 			snubbed := len(pc.outstanding) > 0 && time.Since(pc.lastBlock) > snubTimeout
 			c.mu.Unlock()
 			if snubbed {
+				c.reportErr(pc.key, errSnubbed)
 				return errSnubbed
 			}
 		}
@@ -196,11 +205,20 @@ func (c *Client) handshake(conn net.Conn, outgoing bool) (peer.Handshake, error)
 func (c *Client) register(pc *peerConn, h peer.Handshake) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.banned[pc.key] {
+	if c.rep.Banned(pc.key) {
 		return ErrBanned
 	}
 	if c.peerIDs[h.PeerID] {
 		return errDuplicate
+	}
+	sameIP := 0
+	for other := range c.conns {
+		if other.key == pc.key {
+			sameIP++
+		}
+	}
+	if sameIP >= maxConnsPerIP {
+		return errPerIP
 	}
 	pc.id = h.PeerID
 	if pc.outgoing {
@@ -282,6 +300,9 @@ func (pc *peerConn) writeLoop() {
 
 // handle processes one message from the peer.
 func (pc *peerConn) handle(m *peer.Message) error {
+	if !pc.allowMessage(m) {
+		return errFlood
+	}
 	if m == nil {
 		return nil
 	}
@@ -477,7 +498,7 @@ func (pc *peerConn) handlePEX(body []byte) error {
 	for i, a := range p.Added {
 		addrs[i] = a.String()
 	}
-	c.AddPeers(addrs...)
+	c.AddPeersFrom(SourcePEX, addrs...)
 	c.log.Debug("PEX supplied peers", "from", pc.addr, "added", len(p.Added), "dropped", len(p.Dropped))
 	return nil
 }

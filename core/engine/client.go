@@ -9,11 +9,13 @@ import (
 	"log/slog"
 	"math/big"
 	"net"
+	"net/netip"
 	"slices"
 	"sync"
 	"time"
 
 	"github.com/arjun-kshirsagar/beacon/core/peer"
+	"github.com/arjun-kshirsagar/beacon/core/reputation"
 	"github.com/arjun-kshirsagar/beacon/core/torrent"
 	"github.com/arjun-kshirsagar/beacon/core/transport"
 )
@@ -29,7 +31,9 @@ const (
 	rechokeInterval   = 10 * time.Second
 	optimisticEvery   = 3 // rechokes between optimistic unchoke rotations
 	redialAfter       = 5 * time.Minute
-	banStrikes        = 3 // shared hash failures before a peer is banned
+	maxConnsPerIP     = 2    // connections to or from one IP; limits Sybils behind one host
+	maxQueue          = 1000 // addresses waiting to be dialed
+	maxKnown          = 10000
 	metadataExtID     = 1 // our ut_metadata extended message ID
 	pexExtID          = 2 // our ut_pex extended message ID
 	clientVersion     = "Beacon/0.2"
@@ -60,7 +64,14 @@ type Config struct {
 	ListenPort uint16   // advertised to peers in the extension handshake
 	MaxConns   int      // zero means 50
 	Encryption Encryption
-	Logger     *slog.Logger
+	// Reputation records peer behaviour; nil gives the client its own. Share one
+	// between clients so a peer banned in one torrent is banned in all.
+	Reputation *reputation.Book
+	// AllowPrivatePeers lets the DHT and PEX supply private (RFC 1918)
+	// addresses. Off by default, so strangers cannot steer us at hosts on our
+	// own network. Trackers, LPD and AddPeers may always supply them.
+	AllowPrivatePeers bool
+	Logger            *slog.Logger
 }
 
 // Client downloads and seeds one torrent. Every connection, whether we dialed it
@@ -73,6 +84,8 @@ type Client struct {
 	port     uint16
 	maxConns int
 	enc      Encryption
+	rep      *reputation.Book
+	private  bool // AllowPrivatePeers
 	log      *slog.Logger
 	maxMsg   uint32
 	wake     chan struct{}
@@ -82,10 +95,9 @@ type Client struct {
 	conns      map[*peerConn]bool
 	peerIDs    map[[20]byte]bool
 	known      map[string]time.Time // last dial attempt per address
-	queue      []string             // addresses waiting to be dialed
+	queue      []*candidate         // addresses waiting to be dialed
+	queued     map[string]*candidate
 	dialing    int
-	banned     map[string]bool
-	strikes    map[string]int
 	downloaded int64
 	uploaded   int64
 	done       chan struct{} // closed once every piece is verified
@@ -117,6 +129,8 @@ func New(t *torrent.Torrent, store *Storage, cfg Config) (*Client, error) {
 		port:     cfg.ListenPort,
 		maxConns: cfg.MaxConns,
 		enc:      cfg.Encryption,
+		rep:      cfg.Reputation,
+		private:  cfg.AllowPrivatePeers,
 		log:      cfg.Logger,
 		maxMsg:   uint32(max(1+len(have), 9+MaxBlockSize)),
 		wake:     make(chan struct{}, 1),
@@ -124,8 +138,7 @@ func New(t *torrent.Torrent, store *Storage, cfg Config) (*Client, error) {
 		conns:    make(map[*peerConn]bool),
 		peerIDs:  make(map[[20]byte]bool),
 		known:    make(map[string]time.Time),
-		banned:   make(map[string]bool),
-		strikes:  make(map[string]int),
+		queued:   make(map[string]*candidate),
 		done:     make(chan struct{}),
 	}
 	if c.peerID == ([20]byte{}) {
@@ -133,6 +146,9 @@ func New(t *torrent.Torrent, store *Storage, cfg Config) (*Client, error) {
 	}
 	if c.maxConns <= 0 {
 		c.maxConns = defaultMaxConns
+	}
+	if c.rep == nil {
+		c.rep = reputation.New(reputation.Config{})
 	}
 	if c.log == nil {
 		c.log = slog.New(slog.DiscardHandler)
@@ -198,23 +214,97 @@ func banKey(addr string) string {
 	return addr
 }
 
-// AddPeers queues addresses to connect to. Banned peers and addresses tried in
-// the last few minutes are skipped.
-func (c *Client) AddPeers(addrs ...string) {
+// AddPeers queues addresses the user supplied, with the highest priority.
+func (c *Client) AddPeers(addrs ...string) { c.AddPeersFrom(SourceManual, addrs...) }
+
+// AddPeersFrom queues addresses learned from src. Banned peers, addresses tried
+// in the last few minutes, and addresses src may not supply are skipped. An
+// address already queued gains src as another source, which raises its
+// priority. When the queue is full, a new address replaces the lowest-priority
+// one only if it outranks it.
+func (c *Client) AddPeersFrom(src PeerSource, addrs ...string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now()
 	for _, a := range addrs {
-		if c.banned[banKey(a)] {
+		if c.rep.Banned(banKey(a)) || !c.acceptAddr(src, a) {
+			continue
+		}
+		if q := c.queued[a]; q != nil {
+			q.sources |= src
 			continue
 		}
 		if last, ok := c.known[a]; ok && now.Sub(last) < redialAfter {
 			continue
 		}
+		cand := &candidate{addr: a, sources: src}
+		if len(c.queue) >= maxQueue {
+			low := 0
+			for i, q := range c.queue {
+				if q.priority() < c.queue[low].priority() {
+					low = i
+				}
+			}
+			if c.queue[low].priority() >= cand.priority() {
+				continue
+			}
+			delete(c.queued, c.queue[low].addr)
+			c.queue = slices.Delete(c.queue, low, low+1)
+		}
 		c.known[a] = now
-		c.queue = append(c.queue, a)
+		c.queue = append(c.queue, cand)
+		c.queued[a] = cand
+	}
+	if len(c.known) > maxKnown {
+		for a, t := range c.known {
+			if now.Sub(t) >= redialAfter {
+				delete(c.known, a)
+			}
+		}
 	}
 	c.signal()
+}
+
+func (c *Client) acceptAddr(src PeerSource, addr string) bool {
+	return AcceptPeerAddr(src, addr, c.private)
+}
+
+// AcceptPeerAddr reports whether src may supply addr. Strangers (the DHT, PEX
+// and trackers) may not point us at loopback or link-local addresses, and the
+// DHT and PEX may not point us at private ones unless allowPrivate is set.
+func AcceptPeerAddr(src PeerSource, addr string, allowPrivate bool) bool {
+	ap, err := netip.ParseAddrPort(addr)
+	if err != nil {
+		return src == SourceManual // host names come only from the user
+	}
+	ip := ap.Addr().Unmap()
+	if ap.Port() == 0 || ip.IsUnspecified() || ip.IsMulticast() {
+		return false
+	}
+	switch {
+	case src == SourceManual:
+		return true
+	case ip.IsLoopback() || ip.IsLinkLocalUnicast():
+		return false
+	case ip.IsPrivate() && (src == SourceDHT || src == SourcePEX):
+		return allowPrivate
+	}
+	return true
+}
+
+// next removes and returns the highest-priority queued address, oldest first
+// among equals.
+func (c *Client) next() string {
+	best := 0
+	for i, q := range c.queue {
+		if q.priority() > c.queue[best].priority() {
+			best = i
+		}
+	}
+	cand := c.queue[best]
+	c.queue = slices.Delete(c.queue, best, best+1)
+	delete(c.queued, cand.addr)
+	return cand.addr
 }
 
 // Run dials queued peers and runs the choker until ctx is done.
@@ -229,8 +319,7 @@ func (c *Client) Run(ctx context.Context) error {
 	for {
 		c.mu.Lock()
 		for len(c.queue) > 0 && c.dialing+len(c.conns) < c.maxConns {
-			addr := c.queue[0]
-			c.queue = c.queue[1:]
+			addr := c.next()
 			c.dialing++
 			wg.Go(func() {
 				err := c.dial(ctx, addr)
@@ -282,7 +371,7 @@ func (c *Client) Serve(ctx context.Context, l net.Listener) error {
 		addr := conn.RemoteAddr().String()
 		c.mu.Lock()
 		full := len(c.conns)+c.dialing >= c.maxConns+uploadSlots // leave room for incoming peers
-		banned := c.banned[banKey(addr)]
+		banned := c.rep.Banned(banKey(addr))
 		if !full && !banned {
 			c.dialing++
 		}
@@ -398,13 +487,13 @@ func (c *Client) rechoke(rotateOptimistic bool) {
 	}
 }
 
-// ban drops every connection to key and refuses it from now on.
-func (c *Client) ban(key, why string) {
-	if c.banned[key] {
+// report records what key did and, if that bans it, drops its connections.
+// It requires c.mu.
+func (c *Client) report(key string, e reputation.Event) {
+	if !c.rep.Record(key, e) {
 		return
 	}
-	c.banned[key] = true
-	c.log.Info("banning peer", "peer", key, "reason", why)
+	c.log.Info("banning peer", "peer", key, "reason", e.String())
 	for pc := range c.conns {
 		if pc.key == key {
 			pc.close()
@@ -431,17 +520,22 @@ func (c *Client) pieceDone(i int, ap *activePiece) {
 		senders := c.pk.failed(i, ap)
 		c.log.Info("piece failed hash check", "piece", i, "senders", senders)
 		if len(senders) == 1 {
-			c.ban(senders[0], "sent a corrupt piece")
+			c.report(senders[0], reputation.BadPiece)
 		} else {
 			for _, s := range senders {
-				if c.strikes[s]++; c.strikes[s] >= banStrikes {
-					c.ban(s, "involved in repeated corrupt pieces")
-				}
+				c.report(s, reputation.SuspectPiece)
 			}
 		}
 	default:
 		for _, key := range c.pk.verified(i, ap.buf) {
-			c.ban(key, "sent a block that differs from the verified piece")
+			c.report(key, reputation.ProvenBad)
+		}
+		credited := map[string]bool{}
+		for _, b := range ap.blocks {
+			if b.source != nil && !credited[b.source.key] {
+				credited[b.source.key] = true
+				c.report(b.source.key, reputation.GoodPiece)
+			}
 		}
 		c.downloaded += int64(len(ap.buf))
 		for pc := range c.conns {

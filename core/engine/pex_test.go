@@ -72,14 +72,14 @@ func TestSendPEXDeltas(t *testing.T) {
 
 // startPeer runs a client on dir that listens on ip:6881, dials from ip, and
 // knows only the given peers.
-func startPeer(t *testing.T, mem *transport.Memory, tor *torrent.Torrent, dir, ip string, peers ...string) *Client {
+func startPeer(t *testing.T, mem *transport.Memory, tor *torrent.Torrent, allowPrivate bool, dir, ip string, peers ...string) *Client {
 	t.Helper()
 	store, err := OpenStorage(dir, tor)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
-	c, err := New(tor, store, Config{Transport: mem.From(ip), ListenPort: 6881})
+	c, err := New(tor, store, Config{Transport: mem.From(ip), ListenPort: 6881, AllowPrivatePeers: allowPrivate})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,24 +109,35 @@ func TestPEXIntroducesPeers(t *testing.T) {
 	defer func(d time.Duration) { pexInterval = d }(pexInterval)
 	pexInterval = 50 * time.Millisecond
 
-	for _, private := range []bool{false, true} {
+	tests := []struct {
+		name                  string
+		private, allowPrivate bool
+		want                  bool
+	}{
+		{"public swarm", false, true, true},
+		{"private addresses filtered", false, false, false},
+		{"private torrent", true, true, false},
+	}
+	for _, tt := range tests {
 		mem := transport.NewMemory()
 		src := t.TempDir()
 		tor := seedDir(t, src)
-		tor.Private = private
+		tor.Private = tt.private
 
-		startPeer(t, mem, tor, src, "10.0.0.1")
-		b := startPeer(t, mem, tor, t.TempDir(), "10.0.0.2", "10.0.0.1:6881")
-		c := startPeer(t, mem, tor, t.TempDir(), "10.0.0.3", "10.0.0.1:6881")
+		startPeer(t, mem, tor, tt.allowPrivate, src, "10.0.0.1")
+		b := startPeer(t, mem, tor, tt.allowPrivate, t.TempDir(), "10.0.0.2", "10.0.0.1:6881")
+		c := startPeer(t, mem, tor, tt.allowPrivate, t.TempDir(), "10.0.0.3", "10.0.0.1:6881")
 
-		// B and C only know the seeder; PEX from it should introduce them.
-		deadline := time.Now().Add(3 * time.Second)
+		// B and C only know the seeder; PEX from it may introduce them.
+		deadline := time.Now().Add(time.Second)
+		if tt.want {
+			deadline = time.Now().Add(5 * time.Second)
+		}
 		for time.Now().Before(deadline) && !(knows(b, "10.0.0.3:6881") && knows(c, "10.0.0.2:6881")) {
 			time.Sleep(10 * time.Millisecond)
 		}
-		learned := knows(b, "10.0.0.3:6881") && knows(c, "10.0.0.2:6881")
-		if learned == private {
-			t.Fatalf("private=%v: peers learned each other via PEX = %v", private, learned)
+		if learned := knows(b, "10.0.0.3:6881") && knows(c, "10.0.0.2:6881"); learned != tt.want {
+			t.Errorf("%s: peers learned each other via PEX = %v, want %v", tt.name, learned, tt.want)
 		}
 	}
 }

@@ -153,7 +153,7 @@ func TestSmartBan(t *testing.T) {
 	c.pk.active[0] = ap
 	c.mu.Unlock()
 	c.pieceDone(0, ap)
-	if c.banned["good"] || c.banned["evil"] {
+	if c.rep.Banned("good") || c.rep.Banned("evil") {
 		t.Fatal("banned before the culprit is known")
 	}
 	// ...then verifies with good data, which identifies the evil block.
@@ -163,8 +163,8 @@ func TestSmartBan(t *testing.T) {
 	c.pk.active[0] = ap
 	c.mu.Unlock()
 	c.pieceDone(0, ap)
-	if !c.banned["evil"] || c.banned["good"] {
-		t.Fatalf("banned = %v", c.banned)
+	if !c.rep.Banned("evil") || c.rep.Banned("good") {
+		t.Fatalf("evil banned=%v, good banned=%v", c.rep.Banned("evil"), c.rep.Banned("good"))
 	}
 }
 
