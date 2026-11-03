@@ -10,8 +10,10 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/arjun-kshirsagar/beacon/core/mesh"
+	"github.com/arjun-kshirsagar/beacon/core/offline"
 	"github.com/arjun-kshirsagar/beacon/core/transport"
 )
 
@@ -92,6 +94,7 @@ type Node struct {
 	mu     sync.Mutex
 	done   chan struct{}
 	wiped  bool
+	files  atomic.Pointer[offline.Service] // set by EnableFiles
 }
 
 // ErrWiped is returned after Wipe.
@@ -107,15 +110,27 @@ func NewNode(identity []byte, nickname string, l Listener) (*Node, error) {
 		return nil, err
 	}
 	ls := &links{ready: make(chan transport.Link, 64)}
+	node := &Node{id: id, links: ls}
 	n, err := mesh.New(mesh.Config{Identity: id, Nickname: nickname, Links: ls,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		OnMessage: func(m mesh.Message) {
 			l.OnMessage(string(m.From), m.Nickname, m.Channel, m.Text, m.Time.UnixMilli())
+		},
+		OnData: func(from mesh.Fingerprint, data []byte) {
+			if f := node.files.Load(); f != nil {
+				f.OnData(from, data)
+			}
+		},
+		OnShare: func(s mesh.Share) {
+			if f := node.files.Load(); f != nil {
+				f.OnShare(s)
+			}
 		}})
 	if err != nil {
 		return nil, err
 	}
-	return &Node{id: id, node: n, links: ls}, nil
+	node.node = n
+	return node, nil
 }
 
 // Start runs the node in the background. It may be called once.
@@ -136,6 +151,9 @@ func (n *Node) Start() error {
 
 // Stop shuts the node down and closes its links.
 func (n *Node) Stop() {
+	if f := n.files.Load(); f != nil {
+		f.Close()
+	}
 	n.mu.Lock()
 	cancel, done := n.cancel, n.done
 	n.mu.Unlock()
@@ -149,6 +167,9 @@ func (n *Node) Stop() {
 // Wipe stops the node and zeroes its keys in memory, for a panic wipe. The
 // platform must also delete the stored identity.
 func (n *Node) Wipe() {
+	if f := n.files.Swap(nil); f != nil {
+		f.Close()
+	}
 	n.Stop()
 	n.mu.Lock()
 	n.wiped = true

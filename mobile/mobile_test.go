@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -202,5 +205,59 @@ func TestShouldConnect(t *testing.T) {
 	}
 	if ShouldConnect(a, a) || ShouldConnect(a, []byte{1}) || ShouldConnect(nil, b) {
 		t.Fatal("bad instances")
+	}
+}
+
+type noGroups struct{}
+
+func (noGroups) HostGroup(network, passphrase string) {}
+func (noGroups) JoinGroup(network, passphrase string) {}
+
+func TestFilesAPI(t *testing.T) {
+	a, _ := newNode(t, "alice")
+	b, _ := newNode(t, "bob")
+	if _, err := a.ShareFile("x"); err == nil {
+		t.Fatal("shared before EnableFiles")
+	}
+	if a.EnableFiles("", noGroups{}) == nil || a.EnableFiles(t.TempDir(), nil) == nil {
+		t.Fatal("bad EnableFiles accepted")
+	}
+	for _, n := range []*Node{a, b} {
+		if err := n.EnableFiles(t.TempDir(), noGroups{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if a.EnableFiles(t.TempDir(), noGroups{}) == nil {
+		t.Fatal("enabled twice")
+	}
+	connect(t, a, b, 182)
+	waitFor(t, "peers", func() bool { return len(peers(t, b)) == 1 })
+
+	path := filepath.Join(t.TempDir(), "notes.txt")
+	os.WriteFile(path, []byte("offline notes"), 0o644)
+	ih, err := a.ShareFile(path)
+	if err != nil || len(ih) != 40 {
+		t.Fatalf("%q %v", ih, err)
+	}
+	waitFor(t, "share seen", func() bool { return strings.Contains(b.SharesJSON(), ih) })
+	var shares []struct {
+		InfoHash, Name, From string
+		Size                 int64
+	}
+	json.Unmarshal([]byte(b.SharesJSON()), &shares)
+	if len(shares) != 1 || shares[0].Name != "notes.txt" || shares[0].From != "alice" || shares[0].Size != 13 {
+		t.Fatalf("shares %+v", shares)
+	}
+	if !strings.Contains(a.TransfersJSON(), `"state":"sharing"`) {
+		t.Fatalf("transfers %s", a.TransfersJSON())
+	}
+	if b.GetFile("nothex") == nil || b.GetFile(strings.Repeat("0", 40)) == nil {
+		t.Fatal("bad or unknown info-hash accepted")
+	}
+	if err := b.GetFile(ih); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.TransfersJSON(), `"state":"asking"`) {
+		t.Fatalf("transfers %s", b.TransfersJSON())
 	}
 }
