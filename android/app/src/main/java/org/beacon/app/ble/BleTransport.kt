@@ -251,7 +251,9 @@ class BleTransport(private val context: Context, private val node: Node) {
             if (s != BluetoothGatt.GATT_SUCCESS) throw IllegalStateException("notify failed: $s")
         }
 
+        /** Go gave up on the link (it went silent): forget it and disconnect. */
         override fun close() {
+            if (servers.remove(device.address, this)) Log.i(TAG, "link dropped by the mesh, $linkCount links")
             server?.cancelConnection(device)
         }
     }
@@ -352,7 +354,9 @@ class BleTransport(private val context: Context, private val node: Node) {
                 }
             }
 
+        /** Go gave up on the link (it went silent): forget it and disconnect. */
         override fun close() {
+            if (clients.remove(device.address, this)) Log.i(TAG, "link dropped by the mesh, $linkCount links")
             gatt?.disconnect()
         }
 
