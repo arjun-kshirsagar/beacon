@@ -389,12 +389,22 @@ func (n *Node) storeLocked(raw []byte, now time.Time) {
 	n.store = append(n.store, stored{raw: raw, at: now})
 }
 
-// originateLocked signs (if its type requires) and sends a new packet.
-func (n *Node) originateLocked(p *Packet) {
+// stampLocked fills in a new packet's header.
+func (n *Node) stampLocked(p *Packet) {
 	p.TTL = MaxTTL
 	p.ID = PacketID(randomID())
 	p.Time = n.cfg.Now().Truncate(time.Millisecond)
 	p.Sender = n.myID
+}
+
+// originateLocked stamps, signs (if its type requires) and sends a new packet.
+func (n *Node) originateLocked(p *Packet) {
+	n.stampLocked(p)
+	n.sendStampedLocked(p)
+}
+
+// sendStampedLocked signs (if its type requires) and sends a stamped packet.
+func (n *Node) sendStampedLocked(p *Packet) {
 	if p.Type.signed() {
 		p.Sign(n.id.sign)
 	}

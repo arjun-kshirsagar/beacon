@@ -137,6 +137,74 @@ announce yet is held (up to 8 per sender, 64 senders, for 1 minute) and
 delivered if the announce arrives. A relay that knows the sender's key drops a
 message whose signature fails and does not relay it.
 
+### Noise handshake (`0x03`)
+
+| Size | Field |
+|---|---|
+| 1 | step: 1, 2 or 3 |
+| rest | Noise handshake message |
+
+Direct messages use `Noise_XX_25519_ChaChaPoly_SHA256` (Noise revision 34),
+with the prologue `beacon-mesh-v1`. The initiator sends step 1 to the
+recipient's current ID; replies go to the ID each message came from.
+
+| Step | Noise message | Payload |
+|---|---|---|
+| 1 | `-> e` | empty |
+| 2 | `<- e, ee, s, es` | identity proof of the responder |
+| 3 | `-> s, se` | identity proof of the initiator |
+
+The **identity proof** is the sender's Ed25519 public key (32 bytes) followed
+by its signature over the ASCII string `beacon-noise-static-v1`, a zero byte,
+and the sender's 32-byte X25519 static key. A receiver checks the signature
+against the static key the handshake authenticated. The initiator also checks
+that the proof's fingerprint is the one it meant to reach, and abandons the
+handshake otherwise, before revealing its own identity in step 3. Payloads in
+steps 2 and 3 are encrypted by Noise, so relays learn neither identity.
+
+If both sides start a handshake at once, the side whose X25519 static key is
+lower (compared as bytes) stays initiator and ignores the other's step 1; the
+other side abandons its own handshake and responds. An unanswered handshake is
+retried after 10 seconds, at most 3 times. Messages written before a session
+exists wait (up to 32 per peer, 2 minutes) and are sent when it is set up.
+
+### Encrypted message (`0x04`)
+
+| Size | Field |
+|---|---|
+| 8 | nonce *n* |
+| rest | ChaCha20-Poly1305 ciphertext with tag |
+
+The ciphertext is produced with the sending key from the handshake's split
+(the initiator's first key, the responder's second) and nonce *n*. Mesh
+packets may be reordered or lost, so the nonce is sent explicitly rather than
+counted by both sides. A sender uses each nonce once, counting from 0. A
+receiver accepts a nonce once, and only if it is within 256 of the highest it
+has accepted.
+
+The associated data is the packet from offset 0 up to (not including) the
+payload length, with the TTL byte set to 0. This binds the ciphertext to the
+packet ID, timestamp, sender and recipient, so it cannot be replayed under a
+fresh packet ID to get past duplicate filtering.
+
+The plaintext is:
+
+| Size | Field |
+|---|---|
+| 1 | kind, `0x01` for text |
+| 2 | text length *n* |
+| *n* | text, under the same rules as channel text |
+| rest | zero padding |
+
+The plaintext is padded to the smallest of 64, 128, 256, 512, 1024 or 2048
+bytes that fits, so the ciphertext length reveals only a size class.
+
+A new session with the same peer replaces the old one; the old one still
+decrypts (but no longer encrypts) until the next replacement, so messages in
+flight are not lost. A receiver that gets an encrypted message for which it has
+no session (it restarted, say) starts a new handshake with the sender. That
+message is lost; later ones get through.
+
 ## Store-and-forward
 
 Every packet a node originates or relays is kept for 10 minutes (at most 256

@@ -137,11 +137,12 @@ func (p *Packet) Verify(pub ed25519.PublicKey) bool {
 }
 
 // header returns the fields a Noise ciphertext binds as associated data: the
-// body up to the payload, with the TTL zeroed.
+// body up to the payload length, with the TTL zeroed.
 func (p *Packet) header() []byte {
 	q := *p
 	q.TTL, q.Payload, q.Signature = 0, nil, nil
-	return q.appendBody(nil)
+	b := q.appendBody(nil)
+	return b[:len(b)-2]
 }
 
 // ParsePacket decodes and validates one packet. It never allocates more than
