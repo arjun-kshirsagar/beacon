@@ -28,6 +28,42 @@ in progress, the partial packet is discarded (its tail was lost). Frames
 without the start bit and no packet in progress are discarded. A packet in
 progress larger than `MaxPacket` is discarded.
 
+### LAN links
+
+On a local network, nodes find each other with UDP multicast and link over
+TCP. Every 5 seconds each node sends a **beacon** to `239.255.66.66:6766`:
+
+| Size | Field |
+|---|---|
+| 4 | `BCN1` |
+| 1 | version, `1` |
+| 8 | instance: random per run, used only to pair up links |
+| 2 | TCP port the node accepts links on |
+
+A node hearing a beacon from an instance it has no link to connects to the
+beacon's **source IP** and the advertised port; it never connects anywhere
+else because of a beacon. Beacons are rate-limited to 30 a minute per source
+IP, and a node redials the same instance at most every 10 seconds.
+
+On a new TCP connection both sides immediately send a **hello**, and must
+receive the other's within 5 seconds:
+
+| Size | Field |
+|---|---|
+| 12 | `beacon-link` followed by a zero byte |
+| 1 | version, `1` |
+| 8 | sender's instance |
+
+A connection to one's own instance is closed. If two nodes connect to each
+other at once, both keep the connection dialed by the lower instance (compared
+as bytes) and close the other.
+
+After the hello, the connection carries link frames, each prefixed with its
+length as a 2-byte big-endian integer. LAN links have an MTU of 8192 bytes, so
+every packet fits in one frame. A frame of length 0 or over the MTU closes the
+connection. A node keeps at most 16 LAN links and at most 2 unfinished
+handshakes per remote IP.
+
 ## Packet
 
 | Offset | Size | Field |

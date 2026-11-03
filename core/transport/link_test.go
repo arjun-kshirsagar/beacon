@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"errors"
+	"net"
 	"testing"
 	"time"
 )
@@ -49,4 +50,28 @@ func TestRadio(t *testing.T) {
 	if err := r.Connect("a", "b"); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestStreamLink(t *testing.T) {
+	a, b := net.Pipe()
+	la, lb := NewStreamLink(a, 100, "b"), NewStreamLink(b, 100, "a")
+	go func() {
+		la.WriteFrame([]byte("one"))
+		la.WriteFrame(make([]byte, 100))
+	}()
+	if f, err := lb.ReadFrame(); err != nil || string(f) != "one" {
+		t.Fatalf("%q %v", f, err)
+	}
+	if f, err := lb.ReadFrame(); err != nil || len(f) != 100 {
+		t.Fatalf("%d bytes, %v", len(f), err)
+	}
+	if !errors.Is(la.WriteFrame(make([]byte, 101)), ErrFrameTooLarge) || la.WriteFrame(nil) == nil {
+		t.Fatal("bad frame sent")
+	}
+	// A peer announcing a frame over the MTU is refused before any allocation.
+	go a.Write([]byte{0xff, 0xff})
+	if _, err := lb.ReadFrame(); err == nil {
+		t.Fatal("oversized frame accepted")
+	}
+	la.Close()
 }
