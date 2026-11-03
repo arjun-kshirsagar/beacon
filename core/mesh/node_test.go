@@ -35,6 +35,14 @@ func newMesh(t *testing.T, mtu int) *testMesh {
 
 func (m *testMesh) add(name string, mod ...func(*Config)) *testNode {
 	m.t.Helper()
+	tn := m.create(name, mod...)
+	go tn.Run(m.ctx)
+	return tn
+}
+
+// create adds a node without starting it.
+func (m *testMesh) create(name string, mod ...func(*Config)) *testNode {
+	m.t.Helper()
 	id, err := NewIdentity()
 	if err != nil {
 		m.t.Fatal(err)
@@ -58,7 +66,6 @@ func (m *testMesh) add(name string, mod ...func(*Config)) *testNode {
 	}
 	tn.Node = n
 	m.nodes[name] = tn
-	go n.Run(m.ctx)
 	return tn
 }
 
