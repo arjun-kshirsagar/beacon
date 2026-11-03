@@ -91,3 +91,77 @@ A node receiving a packet:
    other links with the TTL lowered by one.
 
 Originators send with TTL 7.
+
+## Identity
+
+Each device generates its own identity; there are no accounts.
+
+- An **Ed25519** key pair signs broadcasts.
+- An **X25519** key pair is the Noise static key for direct messages.
+- The **fingerprint** is the lowercase hex SHA-256 of the Ed25519 public key.
+  People verify each other by comparing fingerprints (or scanning them as QR
+  codes).
+
+## Payloads
+
+### Announce (`0x01`)
+
+| Size | Field |
+|---|---|
+| 32 | Ed25519 public key |
+| 32 | X25519 Noise static public key |
+| 1 | nickname length *n*, 1–32 |
+| *n* | nickname, UTF-8 |
+
+The packet is signed by the key it carries, which binds the Noise key and the
+nickname to the fingerprint. Nicknames must be valid UTF-8 without control or
+format characters (so a name cannot use, for example, right-to-left overrides
+to imitate another).
+
+A node announces when it starts, every 5 minutes, and whenever its ephemeral
+ID changes. Receivers map the sender ID to the announced keys. A peer is
+forgotten 20 minutes after its last announce. While an ID is bound to one
+fingerprint, an announce from a different key for the same ID is ignored.
+
+### Channel message (`0x02`)
+
+| Size | Field |
+|---|---|
+| 1 | channel length *n*, 2–32 |
+| *n* | channel: `#` followed by `a`–`z`, `0`–`9`, `-` or `_` |
+| rest | text, UTF-8, 1–1024 bytes, no control characters except newline |
+
+Channel messages are signed. A receiver verifies the signature against the
+sender ID's announced key before delivering. A message from a sender ID with no
+announce yet is held (up to 8 per sender, 64 senders, for 1 minute) and
+delivered if the announce arrives. A relay that knows the sender's key drops a
+message whose signature fails and does not relay it.
+
+## Store-and-forward
+
+Every packet a node originates or relays is kept for 10 minutes (at most 256
+packets, oldest dropped first). When a new link comes up, the node sends the
+new neighbour every stored packet, oldest first. Duplicate filtering stops the
+copies spreading further than new ground. This carries messages across gaps in
+the mesh: a device that moves between groups delivers what it heard.
+
+## Ephemeral IDs
+
+A node picks a new random sender ID every 15 minutes and announces it, while
+still accepting packets addressed to its previous ID for one more period. IDs
+stop packet headers being linked over time. Announces carry the long-term
+signing key, so any node in the mesh can still link a person's IDs to them;
+rotation protects against passive tracking of packet headers, not against
+mesh participants.
+
+## Limits
+
+| Limit | Value |
+|---|---|
+| Packets accepted per link | 50 per second, burst 200 |
+| Packets accepted per sender ID | 20 per second, burst 100 |
+| Packets queued for sending per link | 512, then dropped |
+| Peers remembered | 1024, oldest evicted |
+
+Sender IDs are free to invent, so the per-link limit is the real flood
+defence: a flooding device is held to its own links' rates at the first hop.
