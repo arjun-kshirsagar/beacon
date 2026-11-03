@@ -1,6 +1,7 @@
 package mesh
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -44,6 +45,12 @@ var (
 	linkTimeout    = 15 * time.Second
 )
 
+// dupLinkCooldown limits how often a duplicate link to one neighbour is
+// closed. The TTL is not signed, so a device on another link can replay a
+// neighbour's announce with the full TTL and pass for it; the cooldown bounds
+// how often that can cut the real link.
+const dupLinkCooldown = time.Minute
+
 // Config configures a Node. Zero durations pick the defaults.
 type Config struct {
 	Identity *Identity
@@ -80,6 +87,7 @@ type Stats struct {
 	Links, Peers, Stored            int
 	Delivered, Relayed, Duplicates  uint64
 	Dropped, RateLimited, BadSigned uint64
+	DuplicateLinks                  uint64 // links closed for leading to a neighbour already linked
 }
 
 // Node is one participant in the mesh: it originates, verifies, delivers and
@@ -105,6 +113,9 @@ type Node struct {
 	stats    Stats
 
 	keepalive, linkTimeout time.Duration // copied from the package defaults
+
+	announceRaw []byte                    // our latest announce, sent on every new link
+	dupClosed   map[Fingerprint]time.Time // when a duplicate link to each neighbour was last closed
 }
 
 type peerInfo struct {
@@ -132,6 +143,9 @@ type link struct {
 	tokens   bucket
 	done     chan struct{}
 	lastRecv atomic.Int64 // unix nanoseconds of the last frame received
+
+	created   time.Time
+	neighbour Fingerprint // who is at the other end, once known; guarded by Node.mu
 }
 
 // New returns a node. Call Run to start it.
@@ -163,6 +177,8 @@ func New(cfg Config) (*Node, error) {
 		peers:   make(map[PeerID]*peerInfo),
 		pending: make(map[PeerID][]pendingPacket),
 		senders: newLimiter[PeerID](senderRate, senderBurst, maxSenders),
+
+		dupClosed: make(map[Fingerprint]time.Time),
 	}
 	n.keepalive, n.linkTimeout = keepaliveEvery, linkTimeout
 	n.dm.init()
@@ -221,6 +237,11 @@ func (n *Node) housekeeping(ctx context.Context) {
 		}
 		n.expireLocked(now)
 		n.dm.tick(n, now)
+		for fp, at := range n.dupClosed {
+			if now.Sub(at) >= dupLinkCooldown {
+				delete(n.dupClosed, fp)
+			}
+		}
 		stale := n.staleLinksLocked()
 		n.mu.Unlock()
 		for _, l := range stale {
@@ -239,12 +260,18 @@ func (n *Node) addLink(ctx context.Context, tl transport.Link) {
 	l := &link{l: tl, out: make(chan []byte, linkQueue), done: make(chan struct{})}
 	l.lastRecv.Store(time.Now().UnixNano())
 	n.mu.Lock()
-	n.links[l] = true
-	// Store-and-forward: a new neighbour gets everything still worth relaying,
-	// oldest first, including our own announce.
 	now := n.cfg.Now()
+	l.created = now
+	n.links[l] = true
+	// Our announce goes first, even if the store has since dropped it: arriving
+	// with the full TTL, it tells the neighbour who is on this link.
+	if n.announceRaw != nil {
+		n.sendLocked(l, n.announceRaw)
+	}
+	// Store-and-forward: a new neighbour gets everything still worth relaying,
+	// oldest first.
 	for _, s := range n.store {
-		if now.Sub(s.at) < storeFor {
+		if now.Sub(s.at) < storeFor && !bytes.Equal(s.raw, n.announceRaw) {
 			n.sendLocked(l, s.raw)
 		}
 	}
@@ -346,9 +373,54 @@ func (n *Node) receive(l *link, raw []byte) {
 		n.mu.Unlock()
 		return
 	}
+	dup := n.attributeLocked(l, p, now)
 	deliver = n.handleLocked(p, l, now)
 	n.mu.Unlock()
+	if dup != nil {
+		n.log.Debug("duplicate link to a neighbour; closing the older", "peer", dup.l.Peer())
+		dup.l.Close()
+	}
 	n.deliver(deliver)
+}
+
+// attributeLocked notes which neighbour is at the other end of l. Only the
+// originator sends a packet with the full TTL, so a valid announce arriving
+// with MaxTTL came from the device on this link. If another link already
+// leads to that neighbour (a BLE device that changed its address is found
+// and connected to again), it returns the older of the two to close.
+func (n *Node) attributeLocked(l *link, p *Packet, now time.Time) *link {
+	if p.Type != TypeAnnounce || p.TTL != MaxTTL ||
+		p.Time.Before(now.Add(-maxAge)) || p.Time.After(now.Add(maxSkew)) {
+		return nil
+	}
+	a, err := parseAnnounce(p.Payload)
+	if err != nil {
+		return nil
+	}
+	fp := FingerprintOf(a.signKey)
+	if fp == l.neighbour || fp == n.id.Fingerprint() || !p.Verify(a.signKey) {
+		return nil
+	}
+	l.neighbour = fp
+	var other *link
+	for o := range n.links {
+		if o != l && o.neighbour == fp {
+			other = o
+			break
+		}
+	}
+	if other == nil {
+		return nil
+	}
+	if at, ok := n.dupClosed[fp]; ok && now.Sub(at) < dupLinkCooldown {
+		return nil
+	}
+	n.dupClosed[fp] = now
+	n.stats.DuplicateLinks++
+	if l.created.Before(other.created) {
+		return l
+	}
+	return other
 }
 
 func (n *Node) deliver(msgs []Message) {
@@ -473,7 +545,7 @@ func (n *Node) originateLocked(p *Packet) {
 }
 
 // sendStampedLocked signs (if its type requires) and sends a stamped packet.
-func (n *Node) sendStampedLocked(p *Packet) {
+func (n *Node) sendStampedLocked(p *Packet) []byte {
 	if p.Type.signed() {
 		p.Sign(n.id.sign)
 	}
@@ -484,11 +556,14 @@ func (n *Node) sendStampedLocked(p *Packet) {
 	for l := range n.links {
 		n.sendLocked(l, raw)
 	}
+	return raw
 }
 
 func (n *Node) announceLocked() {
 	a := announce{signKey: n.id.SigningKey(), noiseKey: n.id.NoiseKey(), nickname: n.nickname}
-	n.originateLocked(&Packet{Type: TypeAnnounce, Payload: a.encode()})
+	p := &Packet{Type: TypeAnnounce, Payload: a.encode()}
+	n.stampLocked(p)
+	n.announceRaw = n.sendStampedLocked(p)
 }
 
 // handleAnnounce records a peer, reporting whether the announce was valid and

@@ -438,3 +438,105 @@ func TestKeepaliveFrameIsIgnored(t *testing.T) {
 		t.Fatalf("packet after keepalive: %q", got)
 	}
 }
+
+// waitStat polls one of node's stats until it reaches want.
+func waitStat(t *testing.T, tn *testNode, what string, get func(Stats) int, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for get(tn.Stats()) != want && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := get(tn.Stats()); got != want {
+		t.Fatalf("%s: %d, want %d", tn.name, got, want)
+	}
+}
+
+func links(s Stats) int { return s.Links }
+func peers(s Stats) int { return s.Peers }
+
+func TestDuplicateLinks(t *testing.T) {
+	m := newMesh(t, 185)
+	a := m.add("a")
+	b := newForger(t, "b")
+	ann := b.announce("b")
+
+	// b links to a, then links again from a new BLE address, as a phone does
+	// when it changes its advertisement: a keeps only the newer link.
+	old := m.rawLink("b-old", "a")
+	writePacket(t, old, ann)
+	waitStat(t, a, "peers", peers, 1)
+	waitStat(t, a, "links", links, 1)
+	newer := m.rawLink("b-new", "a")
+	writePacket(t, newer, ann)
+	waitStat(t, a, "duplicates closed", func(s Stats) int { return int(s.DuplicateLinks) }, 1)
+	waitStat(t, a, "links after duplicate", links, 1)
+	if old.WriteFrame(keepaliveFrame) == nil {
+		t.Fatal("the older link is still open")
+	}
+	if err := newer.WriteFrame(keepaliveFrame); err != nil {
+		t.Fatalf("the newer link was closed: %v", err)
+	}
+
+	// Anyone can replay b's announce with the full TTL (the TTL is not
+	// signed), so within the cooldown a further duplicate is left alone
+	// rather than cutting b's link again.
+	writePacket(t, m.rawLink("replay", "a"), ann)
+	waitStat(t, a, "links after replay", links, 2)
+	time.Sleep(100 * time.Millisecond)
+	if s := a.Stats(); s.Links != 2 || s.DuplicateLinks != 1 {
+		t.Fatalf("replay within cooldown closed a link: %d links, %d closed", s.Links, s.DuplicateLinks)
+	}
+
+	// A relayed copy (TTL below the maximum) says nothing about the link.
+	c := newForger(t, "c")
+	relayed := c.announce("c")
+	relayed.TTL = MaxTTL - 1
+	writePacket(t, m.rawLink("c-1", "a"), relayed)
+	writePacket(t, m.rawLink("c-2", "a"), relayed)
+	waitStat(t, a, "links after relayed announces", links, 4)
+}
+
+func TestAnnounceOnEveryLink(t *testing.T) {
+	m := newMesh(t, 185)
+	a := m.add("a")
+	waitStat(t, a, "stored", func(s Stats) int { return min(s.Stored, 1) }, 1)
+	// Push a's announce out of its store-and-forward buffer.
+	for i := range maxStored + 10 {
+		if err := a.SendChannel("#general", fmt.Sprintf("filler %d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m.connect("x", "a")
+	l, err := m.radio.Node("x").Accept(m.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := make(chan *Packet, 1)
+	go func() {
+		var asm assembler
+		for {
+			f, err := l.ReadFrame()
+			if err != nil {
+				return
+			}
+			if raw, _ := asm.add(f); raw != nil {
+				p, _ := ParsePacket(raw)
+				first <- p
+				return
+			}
+		}
+	}()
+	select {
+	case p := <-first:
+		if p == nil || p.Type != TypeAnnounce || p.TTL != MaxTTL {
+			t.Fatalf("first packet on a new link is %+v, want a's announce with the full TTL", p)
+		}
+		ann, err := parseAnnounce(p.Payload)
+		if err != nil || FingerprintOf(ann.signKey) != a.Fingerprint() {
+			t.Fatal("first packet is someone else's announce")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("nothing sent on a new link")
+	}
+}

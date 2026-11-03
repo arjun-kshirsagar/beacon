@@ -32,7 +32,19 @@ progress larger than `MaxPacket` is discarded.
 receivers rebuild nothing from it. A node sends one on any link it has sent
 nothing on for 5 seconds, always between packets, and closes a link it has
 received nothing on for 15 seconds. This drops a neighbour whose app has died
-while its radio connection stayed up.
+while its radio connection stayed up. Implementations without keepalives can
+still link, but their links close whenever they are idle for 15 seconds.
+
+**Duplicate links.** Only a packet's originator sends it with TTL 7, so a
+validly signed announce that arrives with TTL 7 names the device at the other
+end of that link. When two links lead to the same fingerprint, the node closes
+the older one. This happens when a BLE device changes its advertised address
+and a neighbour connects to it again. The TTL is not signed, so a device on
+another link can replay a neighbour's announce with TTL 7 and pass for it. A
+node therefore closes at most one duplicate link per neighbour per minute,
+which bounds how often such a replay can cut the real link. The real
+neighbour's next link is newer than the impostor's, so the impostor's is the
+one closed next time.
 
 ### BLE links
 
@@ -285,8 +297,9 @@ message is lost; later ones get through.
 ## Store-and-forward
 
 Every packet a node originates or relays is kept, once, for 10 minutes (at most 256
-packets, oldest dropped first). When a new link comes up, the node sends the
-new neighbour every stored packet, oldest first. Duplicate filtering stops the
+packets, oldest dropped first). When a new link comes up, the node first sends
+its own latest announce, even if the store has dropped it, then every other
+stored packet, oldest first. Duplicate filtering stops the
 copies spreading further than new ground. This carries messages across gaps in
 the mesh: a device that moves between groups delivers what it heard.
 
