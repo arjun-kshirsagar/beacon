@@ -49,7 +49,17 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import java.text.DateFormat
 import java.util.Date
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.beacon.app.ChatMessage
+import org.beacon.app.Transfer
+import org.beacon.app.formatSize
 import org.beacon.app.GENERAL
 import org.beacon.app.MeshState
 import org.beacon.app.PeerInfo
@@ -142,11 +152,7 @@ private fun MainScreen(onWipe: () -> Unit) {
                     onWipe = onWipe,
                 )
                 Tab.Chat -> ChatScreen(conversation, onConversation = { conversation = it })
-                Tab.Files -> Column(Modifier.padding(24.dp)) {
-                    Text("Files", style = MaterialTheme.typography.headlineSmall)
-                    Spacer(Modifier.height(8.dp))
-                    Text("Sharing files with people nearby arrives in the next version.")
-                }
+                Tab.Files -> FilesScreen()
             }
         }
     }
@@ -274,5 +280,97 @@ private fun Composer(onSend: (String) -> String?) {
         )
         Spacer(Modifier.width(8.dp))
         Button(onClick = { send() }, enabled = text.isNotBlank()) { Text("Send") }
+    }
+}
+
+@Composable
+private fun FilesScreen() {
+    val context = LocalContext.current
+    val shares by MeshState.shares.collectAsState()
+    val transfers by MeshState.transfers.collectAsState()
+    val scope = rememberCoroutineScope()
+    var status by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        busy = true
+        status = "Preparing the file…"
+        scope.launch {
+            // Copying and hashing a large file takes a while; keep it off the UI thread.
+            val err = withContext(Dispatchers.IO) { MeshState.shareUri(context, uri) }
+            busy = false
+            status = err ?: "Shared. People nearby can now fetch it."
+        }
+    }
+    val mine = transfers.map { it.infoHash }.toSet()
+    val nearby = shares.filter { !it.have && it.infoHash !in mine }
+
+    LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        item {
+            Text("Files", style = MaterialTheme.typography.headlineSmall)
+            Text(
+                "Files travel phone to phone over Wi-Fi Direct, no internet needed. " +
+                    "Every piece is checked, so a file arrives exactly as shared.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Spacer(Modifier.height(8.dp))
+            Button(onClick = { pick.launch(arrayOf("*/*")) }, enabled = !busy) { Text("Share a file") }
+            status?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        }
+        if (transfers.isNotEmpty()) {
+            item { Text("Your files", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 8.dp)) }
+            items(transfers, key = { "t" + it.infoHash }) { TransferCard(it) }
+        }
+        item { Text("Nearby files", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 8.dp)) }
+        if (nearby.isEmpty()) {
+            item { Text("Nothing shared nearby yet.", style = MaterialTheme.typography.bodySmall) }
+        }
+        items(nearby, key = { "s" + it.infoHash }) { f ->
+            Card(Modifier.fillMaxWidth()) {
+                Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(f.name, style = MaterialTheme.typography.titleSmall)
+                        val more = if (f.sources > 1) " and ${f.sources - 1} more" else ""
+                        Text("${formatSize(f.size)} · from ${f.from}$more", style = MaterialTheme.typography.bodySmall)
+                    }
+                    Button(onClick = { status = MeshState.getFile(f.infoHash) }) { Text("Get") }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TransferCard(t: Transfer) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(t.name.ifEmpty { "Looking up the file…" }, style = MaterialTheme.typography.titleSmall)
+            val state = when (t.state) {
+                "sharing" -> "Sharing"
+                "seeding" -> "Received and verified; sharing it on"
+                "downloading" -> "Receiving ${t.pieces}/${t.totalPieces} pieces"
+                "asking" -> "Asking for it"
+                "joining" -> "Joining the Wi-Fi Direct group"
+                "fetching" -> "Getting the file's details"
+                "failed" -> "Failed: ${t.error}"
+                else -> t.state
+            }
+            Text(state, style = MaterialTheme.typography.bodySmall)
+            if (t.totalPieces > 0 && t.state == "downloading") {
+                LinearProgressIndicator(progress = { t.progress }, modifier = Modifier.fillMaxWidth())
+            }
+            if (t.totalPieces > 0) {
+                Text("${t.peers} connected · sent ${formatSize(t.uploaded)} to others",
+                    style = MaterialTheme.typography.labelSmall)
+            }
+            if (t.from.isNotEmpty()) {
+                val parts = t.from.entries.sortedByDescending { it.value }.joinToString(", ") { "${it.key}: ${formatSize(it.value)}" }
+                Text("Received from ${t.from.size} phone${if (t.from.size == 1) "" else "s"}: $parts",
+                    style = MaterialTheme.typography.labelSmall)
+            }
+            if (t.state == "seeding" && t.path.isNotEmpty()) {
+                Text("Saved to ${t.path}", style = MaterialTheme.typography.labelSmall)
+            }
+        }
     }
 }

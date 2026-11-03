@@ -45,4 +45,28 @@ class ModelTest {
         assertEquals(12L, parseRelayed("""{"Links":2,"Relayed":12}"""))
         assertEquals(0L, parseRelayed("garbage"))
     }
+
+    @Test
+    fun parsesFilesFromGo() {
+        val ih = "ab".repeat(20)
+        val shares = parseShares("""[{"infoHash":"$ih","name":"a.mp4","size":52428800,"from":"alice","sources":2,"have":false},
+            {"infoHash":"short"}]""")
+        assertEquals(listOf(SharedFile(ih, "a.mp4", 52428800, "alice", 2, false)), shares)
+
+        val t = parseTransfers("""[{"infoHash":"$ih","name":"a.mp4","state":"downloading","pieces":50,
+            "totalPieces":200,"peers":2,"uploaded":0,"from":{"192.168.49.1":3000,"192.168.49.20":2000}}]""").single()
+        assertEquals(0.25f, t.progress)
+        assertEquals(mapOf("192.168.49.1" to 3000L, "192.168.49.20" to 2000L), t.from)
+        assertTrue(parseTransfers("[").isEmpty())
+    }
+
+    @Test
+    fun formatsAndSanitises() {
+        assertEquals("50.0 MB", formatSize(50L shl 20))
+        assertEquals("512 B", formatSize(512))
+        assertEquals("_etc_passwd", safeFileName("/etc/passwd"))
+        assertEquals("secret", safeFileName("..secret"))
+        assertEquals("shared-file", safeFileName("..."))
+        assertEquals("a_b.txt", safeFileName("a\\b.txt"))
+    }
 }

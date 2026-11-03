@@ -76,7 +76,11 @@ class MainActivity : ComponentActivity() {
                 Manifest.permission.BLUETOOTH_SCAN,
                 Manifest.permission.BLUETOOTH_ADVERTISE,
                 Manifest.permission.BLUETOOTH_CONNECT,
-            )
+            ) + when {
+                Build.VERSION.SDK_INT >= 33 -> listOf(Manifest.permission.NEARBY_WIFI_DEVICES)
+                // Wi-Fi Direct on Android 12; Android asks for coarse with fine.
+                else -> listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+            }
         } else {
             listOf(Manifest.permission.ACCESS_FINE_LOCATION)
         }

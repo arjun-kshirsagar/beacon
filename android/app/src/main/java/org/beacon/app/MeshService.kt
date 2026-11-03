@@ -21,6 +21,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.beacon.app.ble.BleTransport
+import org.beacon.app.wifi.WifiDirect
 import org.beacon.mobile.Mobile
 import org.beacon.mobile.Node
 
@@ -32,6 +33,7 @@ class MeshService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var node: Node? = null
     private var ble: BleTransport? = null
+    private var wifi: WifiDirect? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -50,6 +52,8 @@ class MeshService : Service() {
             node = n
             MeshState.attach(n, nickname)
             ble = BleTransport(this, n).also { it.start() }
+            wifi = WifiDirect(this, n).also { it.start() }
+            n.enableFiles(MeshState.downloadsDir(this).path, wifi)
         } catch (e: Exception) {
             Log.e(TAG, "starting the mesh", e)
             stopSelf()
@@ -75,6 +79,7 @@ class MeshService : Service() {
 
     override fun onDestroy() {
         scope.cancel()
+        wifi?.stop()
         ble?.stop()
         node?.stop()
         MeshState.detach()
@@ -83,6 +88,8 @@ class MeshService : Service() {
 
     /** Panic wipe: drop every key and message, then stop. */
     private fun wipe() {
+        wifi?.stop()
+        wifi = null
         ble?.stop()
         ble = null
         node?.wipe()
