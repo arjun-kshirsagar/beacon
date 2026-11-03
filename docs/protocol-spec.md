@@ -28,6 +28,37 @@ in progress, the partial packet is discarded (its tail was lost). Frames
 without the start bit and no packet in progress are discarded. A packet in
 progress larger than `MaxPacket` is discarded.
 
+### BLE links
+
+Every Beacon device runs a GATT server with one service and advertises it.
+
+| Item | Value |
+|---|---|
+| Service UUID | `6b1e0001-4c1a-4b8e-9f3d-be7ac0b3e500` |
+| Frames characteristic | `6b1e0002-4c1a-4b8e-9f3d-be7ac0b3e500`, properties write, write without response, notify |
+| Client configuration descriptor | `00002902-0000-1000-8000-00805f9b34fb` |
+
+The advertisement carries the service UUID. The scan response carries service
+data for the service UUID: an 8-byte random **instance**. Instances pair up
+connections only; a device picks a new one, and restarts advertising, every 15
+minutes, so the instance cannot be used to follow it for longer than the
+platform's own address rotation allows.
+
+For each pair of devices exactly one connects: the device whose instance is
+lower (compared as bytes) acts as GATT client (central) and connects to the
+other. The client then:
+
+1. discovers services,
+2. requests an ATT MTU of 517,
+3. enables notifications on the frames characteristic.
+
+The link is then up on both sides, with a frame size of the negotiated ATT MTU
+minus 3 (the ATT header). The client sends frames by writing the
+characteristic (write without response; write with response where that is
+refused). The server sends frames as notifications. Each side has at most one
+GATT operation in flight per connection, so frames go out in order. When the
+connection drops, the link is down; the next scan result reconnects.
+
 ### LAN links
 
 On a local network, nodes find each other with UDP multicast and link over

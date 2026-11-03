@@ -12,3 +12,12 @@ coverage.*
 .idea/
 .vscode/
 .DS_Store
+# Android build output; the AAR is built from ./mobile with gomobile
+android/app/libs/
+android/.gradle/
+android/.kotlin/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.iml
