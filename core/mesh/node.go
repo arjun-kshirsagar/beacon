@@ -27,11 +27,12 @@ const (
 	pendingFor     = time.Minute
 	linkQueue      = 512 // packets queued per link before dropping
 	linkRate       = 50  // packets a second accepted from one link
-	linkBurst      = 200
+	linkBurst      = 2 * maxStored // room for a neighbour's whole store-and-forward flush
 	senderRate     = 20 // packets a second accepted from one origin
 	senderBurst    = 100
 	maxSenders     = 4096
 	seenPerGen     = 16384
+	recentPerGen   = 4096 // packets whose best TTL is remembered, per generation
 )
 
 // Config configures a Node. Zero durations pick the defaults.
@@ -86,6 +87,7 @@ type Node struct {
 	nickname string
 	links    map[*link]bool
 	seen     *seen
+	best     *bestTTL
 	peers    map[PeerID]*peerInfo
 	pending  map[PeerID][]pendingPacket
 	store    []stored
@@ -145,6 +147,7 @@ func New(cfg Config) (*Node, error) {
 		log:     cfg.Logger.With("node", cfg.Identity.Fingerprint().Short()),
 		links:   make(map[*link]bool),
 		seen:    newSeen(seenPerGen, 1e-6),
+		best:    newBestTTL(recentPerGen),
 		peers:   make(map[PeerID]*peerInfo),
 		pending: make(map[PeerID][]pendingPacket),
 		senders: newLimiter[PeerID](senderRate, senderBurst, maxSenders),
@@ -329,10 +332,19 @@ func (n *Node) handleLocked(p *Packet, from *link, now time.Time) []Message {
 		n.stats.Dropped++
 		return nil
 	}
-	if n.seen.check(dedupKey(p)) {
+	key := dedupKey(p)
+	if n.seen.check(key) {
 		n.stats.Duplicates++
+		// Already handled, but this copy may reach further than the first.
+		// A first copy that arrived with TTL 0 was neither relayed nor stored.
+		forUs := p.Recipient != nil && n.mine(*p.Recipient)
+		if old, ok := n.best.get(key); ok && p.TTL > old && !forUs && n.signatureOK(p) {
+			n.best.set(key, p.TTL)
+			n.relayLocked(p, from, now, old == 0)
+		}
 		return nil
 	}
+	n.best.set(key, p.TTL)
 	if n.mine(p.Sender) {
 		return nil // our own packet, back by another path
 	}
@@ -340,13 +352,8 @@ func (n *Node) handleLocked(p *Packet, from *link, now time.Time) []Message {
 		n.stats.RateLimited++
 		return nil
 	}
-	// A signed packet from a sender we know must verify before we relay it, so
-	// forgeries die at the first hop that knows the real key.
-	if p.Type.signed() && p.Type != TypeAnnounce {
-		if peer := n.peers[p.Sender]; peer != nil && !p.Verify(peer.signKey) {
-			n.stats.BadSigned++
-			return nil
-		}
+	if !n.signatureOK(p) {
+		return nil
 	}
 	if p.Recipient != nil && n.mine(*p.Recipient) {
 		return n.dm.handle(n, p, now)
@@ -354,7 +361,7 @@ func (n *Node) handleLocked(p *Packet, from *link, now time.Time) []Message {
 	if p.Type == TypeAnnounce && !n.handleAnnounce(p, now) {
 		return nil
 	}
-	n.relayLocked(p, from, now)
+	n.relayLocked(p, from, now, true)
 	switch p.Type {
 	case TypeAnnounce:
 		return n.flushPending(p.Sender, now)
@@ -364,16 +371,40 @@ func (n *Node) handleLocked(p *Packet, from *link, now time.Time) []Message {
 	return nil
 }
 
-// relayLocked forwards p to every link but from and stores it for neighbours
-// who arrive later.
-func (n *Node) relayLocked(p *Packet, from *link, now time.Time) {
+// signatureOK checks a signed packet from a sender we know before it is
+// relayed, so forgeries die at the first hop that knows the real key.
+// Announces carry their own key.
+func (n *Node) signatureOK(p *Packet) bool {
+	if p.Type == TypeAnnounce {
+		a, err := parseAnnounce(p.Payload)
+		if err != nil || !p.Verify(a.signKey) {
+			n.stats.BadSigned++
+			return false
+		}
+		return true
+	}
+	if !p.Type.signed() {
+		return true
+	}
+	if peer := n.peers[p.Sender]; peer != nil && !p.Verify(peer.signKey) {
+		n.stats.BadSigned++
+		return false
+	}
+	return true
+}
+
+// relayLocked forwards p to every link but from and, if store is set, keeps
+// it for neighbours who arrive later.
+func (n *Node) relayLocked(p *Packet, from *link, now time.Time, store bool) {
 	if p.TTL == 0 {
 		return
 	}
 	q := *p
 	q.TTL--
 	raw := q.Encode()
-	n.storeLocked(raw, now)
+	if store {
+		n.storeLocked(raw, now)
+	}
 	for l := range n.links {
 		if l != from {
 			n.sendLocked(l, raw)
@@ -409,6 +440,7 @@ func (n *Node) sendStampedLocked(p *Packet) {
 		p.Sign(n.id.sign)
 	}
 	n.seen.check(dedupKey(p))
+	n.best.set(dedupKey(p), p.TTL)
 	raw := p.Encode()
 	n.storeLocked(raw, p.Time)
 	for l := range n.links {

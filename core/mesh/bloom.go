@@ -68,3 +68,31 @@ func (s *seen) check(key []byte) bool {
 	s.count++
 	return false
 }
+
+// bestTTL remembers the highest TTL a recent packet arrived with. Flooding is
+// asynchronous: a packet can first arrive along a long path with few hops
+// left, and a later copy along a shorter path may still have hops to spend.
+// Two generations of exact maps keep the most recent entries.
+type bestTTL struct {
+	perGen    int
+	cur, prev map[string]uint8
+}
+
+func newBestTTL(perGen int) *bestTTL {
+	return &bestTTL{perGen: perGen, cur: make(map[string]uint8), prev: make(map[string]uint8)}
+}
+
+func (b *bestTTL) get(key []byte) (uint8, bool) {
+	if ttl, ok := b.cur[string(key)]; ok {
+		return ttl, true
+	}
+	ttl, ok := b.prev[string(key)]
+	return ttl, ok
+}
+
+func (b *bestTTL) set(key []byte, ttl uint8) {
+	if _, ok := b.cur[string(key)]; !ok && len(b.cur) >= b.perGen {
+		b.prev, b.cur = b.cur, make(map[string]uint8, b.perGen)
+	}
+	b.cur[string(key)] = ttl
+}

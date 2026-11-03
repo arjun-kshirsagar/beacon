@@ -82,9 +82,13 @@ A node receiving a packet:
 
 1. Drops it if malformed, if the link has exceeded its rate limit, or if the
    timestamp is more than 15 minutes old or more than 5 minutes in the future.
-2. Drops it if the pair (sender ID, packet ID) was seen recently. Nodes keep a
-   duplicate filter (two rotating Bloom filter generations with a secret hash
-   seed).
+2. If the pair (sender ID, packet ID) was seen recently, the packet is a
+   duplicate and is not delivered again. Nodes keep a duplicate filter (two
+   rotating Bloom filter generations with a secret hash seed). Flooding is
+   asynchronous, so the first copy may have come along a long path with few
+   hops left: nodes also remember the highest TTL each recent packet arrived
+   with, and relay a duplicate (step 4) if its TTL is higher. A node therefore
+   relays a packet at most 8 times.
 3. Delivers it locally if it is a broadcast or addressed to one of the node's
    IDs.
 4. If it is not addressed to this node and its TTL is above 0, sends it on all
@@ -207,7 +211,7 @@ message is lost; later ones get through.
 
 ## Store-and-forward
 
-Every packet a node originates or relays is kept for 10 minutes (at most 256
+Every packet a node originates or relays is kept, once, for 10 minutes (at most 256
 packets, oldest dropped first). When a new link comes up, the node sends the
 new neighbour every stored packet, oldest first. Duplicate filtering stops the
 copies spreading further than new ground. This carries messages across gaps in
@@ -226,10 +230,25 @@ mesh participants.
 
 | Limit | Value |
 |---|---|
-| Packets accepted per link | 50 per second, burst 200 |
+| Packets accepted per link | 50 per second, burst 512 (twice the store, so a neighbour's store-and-forward flush fits) |
 | Packets accepted per sender ID | 20 per second, burst 100 |
 | Packets queued for sending per link | 512, then dropped |
 | Peers remembered | 1024, oldest evicted |
 
 Sender IDs are free to invent, so the per-link limit is the real flood
 defence: a flooding device is held to its own links' rates at the first hop.
+
+There is no routing: directed packets (handshakes and encrypted messages) are
+flooded like broadcasts and only their recipient acts on them. This costs
+bandwidth but reveals nothing about who talks to whom beyond the IDs in the
+header.
+
+## Test vectors
+
+`core/mesh/testdata/vectors.json` holds fixed encodings: an identity derived
+from fixed private keys (bytes `00`–`3f`), its fingerprint and identity proof,
+signed announce and channel packets, the channel packet split into frames for
+a 23-byte MTU, a handshake packet, the associated data of an encrypted packet,
+and a padded plaintext. `core/noise/testdata/cacophony_xx.json` holds the
+Noise test vectors. Another implementation is compatible when it reproduces
+both files.
