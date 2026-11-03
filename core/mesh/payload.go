@@ -84,10 +84,14 @@ func (m channelMessage) encode() []byte {
 }
 
 func parseChannelMessage(b []byte) (channelMessage, error) {
-	if len(b) < 1 || len(b) < 1+int(b[0]) {
+	if len(b) < 1 {
 		return channelMessage{}, fmt.Errorf("%w: channel length", ErrPayload)
 	}
-	m := channelMessage{channel: string(b[1 : 1+b[0]]), text: string(b[1+b[0]:])}
+	end := 1 + int(b[0]) // as int: 1+b[0] in byte arithmetic wraps at 255
+	if len(b) < end {
+		return channelMessage{}, fmt.Errorf("%w: channel length", ErrPayload)
+	}
+	m := channelMessage{channel: string(b[1:end]), text: string(b[end:])}
 	if err := CheckChannel(m.channel); err != nil {
 		return channelMessage{}, err
 	}
