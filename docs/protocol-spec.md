@@ -317,6 +317,57 @@ flight are not lost. A receiver that gets an encrypted message for which it has
 no session (it restarted, say) starts a new handshake with the sender. That
 message is lost; later ones get through.
 
+## Offline file transfer
+
+Devices with no internet share files by announcing them on the mesh and
+moving the data with the BitTorrent engine over a local group network, such
+as a Wi-Fi Direct group. Requests and offers are mesh **data** messages (kind
+`0x02` inside an encrypted direct message), so only the two ends can read
+them and each knows who the other is.
+
+**Request** (`0x01`): asks a device that announced a file to let us fetch it.
+
+| Size | Field |
+|---|---|
+| 1 | `0x01` |
+| 20 | info-hash |
+
+**Offer** (`0x02`): tells the requester how to reach the swarm.
+
+| Size | Field |
+|---|---|
+| 1 | `0x02` |
+| 20 | info-hash |
+| 1 | network name length, 9–32 |
+| … | network name: printable ASCII starting with `DIRECT-` |
+| 1 | passphrase length, 8–63 |
+| … | WPA2 passphrase: printable ASCII without spaces |
+| 1 | peer count *n*, 1–16 |
+| 6*n* | peers: IPv4 address (4 bytes) and TCP port (2 bytes), private addresses only |
+
+The flow:
+
+1. A device that shares a file seeds it and sends a share packet.
+2. A device that wants the file sends a request to the announcer that
+   announced it most recently, and to the next one if no offer arrives
+   within 30 seconds.
+3. The announcer answers only for files it has, and at most 10 requests a
+   minute per asker. If it is in no group, it hosts one with a random network
+   name and passphrase. It then offers its group, its own address and the
+   addresses of the swarm peers it is connected to on the group's network.
+4. The requester accepts an offer only from the device it asked. It joins the
+   group, then connects only to offered peers in its own /24 on the group
+   network, never elsewhere. It fetches the metadata (BEP 9) and the data,
+   checking every piece against the info-hash.
+5. Once complete, the requester seeds the file and sends its own share packet,
+   so later requesters are pointed at it as well and fetch from several
+   devices at once.
+
+A device is in at most one group at a time; an offer for a different group
+than the one it is in is declined. Anyone on the mesh can ask for an
+announced file and so learn the group's credentials: joining a group gives
+network access to its members, on which Beacon serves only the swarm.
+
 ## Store-and-forward
 
 Every packet a node originates or relays is kept, once, for 10 minutes (at most 256

@@ -33,6 +33,7 @@ core/               all protocol logic — pure Go, no platform code
   engine/           piece picker, choking, endgame, storage
   mse/              BitTorrent Message Stream Encryption (obfuscation, not security)
   mesh/             mesh packets, TTL, dedup, fragmentation, store-and-forward
+  offline/          offline file sharing: mesh announcements, group offers, swarms
   noise/            Noise XX handshake
   reputation/       peer scoring and banning
   transport/        Transport interface, TCP/UDP, in-memory fake for tests
