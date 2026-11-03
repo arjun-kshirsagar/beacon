@@ -40,9 +40,15 @@
             </intent-filter>
         </activity>
 
+        <!-- "location" is used only on Android 10 and 11, where BLE scans from
+             the background need it, and only once location is granted (see
+             MeshService.startInForeground). FOREGROUND_SERVICE_LOCATION exists
+             only on Android 14+, where the service runs as connectedDevice alone,
+             and Android checks it only for the types passed to startForeground. -->
         <service
             android:name=".MeshService"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice" />
+            android:foregroundServiceType="connectedDevice|location"
+            tools:ignore="ForegroundServicePermission" />
     </application>
 </manifest>

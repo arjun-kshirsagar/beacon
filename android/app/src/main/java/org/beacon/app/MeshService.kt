@@ -1,5 +1,6 @@
 package org.beacon.app
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,6 +8,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
@@ -106,7 +108,18 @@ class MeshService : Service() {
             .setOngoing(true)
             .build()
         if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+            var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            // Android 10 and 11 deliver BLE scan results only to apps with
+            // location access, and grant "while in use" access to a background
+            // app only through a location foreground service. Without this, a
+            // scan started with the screen off (or after Bluetooth comes back)
+            // finds nobody. Android 12+ scans with BLUETOOTH_SCAN instead.
+            if (Build.VERSION.SDK_INT <= 30 &&
+                checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            ) {
+                type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+            }
+            startForeground(NOTIFICATION_ID, notification, type)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
