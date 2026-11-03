@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"testing"
 	"time"
 
@@ -326,5 +327,60 @@ func writeFile(t *testing.T, path string, size int) {
 	rand.Read(data)
 	if err := mkdirWrite(path, data); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestVerifiedFromAndPeerAddrs(t *testing.T) {
+	mem := transport.NewMemory()
+	src := t.TempDir()
+	tor := seedDir(t, src)
+	serve(t, newClient(t, tor, src, mem), mem, "10.0.0.1:6881")
+	serve(t, newClient(t, tor, src, mem), mem, "10.0.0.2:6881")
+	c := newClient(t, tor, t.TempDir(), mem)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := c.Download(ctx, []string{"10.0.0.1:6881", "10.0.0.2:6881"}); err != nil {
+		t.Fatal(err)
+	}
+	var total int64
+	for ip, n := range c.VerifiedFrom() {
+		if ip != "10.0.0.1" && ip != "10.0.0.2" {
+			t.Fatalf("bytes credited to %q", ip)
+		}
+		total += n
+	}
+	if total != tor.Length {
+		t.Fatalf("credited %d bytes of %d", total, tor.Length)
+	}
+}
+
+func TestPeerAddrs(t *testing.T) {
+	mem := transport.NewMemory()
+	src := t.TempDir()
+	tor := seedDir(t, src)
+	seeder := newClient(t, tor, src, mem)
+	serve(t, seeder, mem, "10.0.0.1:6881")
+
+	// A leecher on 10.0.0.2 that accepts peers on port 7000 says so in its
+	// extended handshake; the seeder can then point others at it.
+	store, err := OpenStorage(t.TempDir(), tor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	leecher, err := New(tor, store, Config{Transport: mem.From("10.0.0.2"), ListenPort: 7000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go leecher.Run(ctx)
+	leecher.AddPeers("10.0.0.1:6881")
+	deadline := time.Now().Add(5 * time.Second)
+	for !slices.Contains(seeder.PeerAddrs(), "10.0.0.2:7000") {
+		if time.Now().After(deadline) {
+			t.Fatalf("seeder knows %v", seeder.PeerAddrs())
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

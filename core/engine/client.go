@@ -7,6 +7,7 @@ import (
 	"crypto/sha1"
 	"errors"
 	"log/slog"
+	"maps"
 	"math/big"
 	"net"
 	"net/netip"
@@ -100,7 +101,8 @@ type Client struct {
 	dialing    int
 	downloaded int64
 	uploaded   int64
-	done       chan struct{} // closed once every piece is verified
+	verified   map[string]int64 // bytes of verified pieces, by sender's ban key (IP)
+	done       chan struct{}    // closed once every piece is verified
 }
 
 // NewPeerID returns a random Azureus-style peer ID.
@@ -136,6 +138,7 @@ func New(t *torrent.Torrent, store *Storage, cfg Config) (*Client, error) {
 		wake:     make(chan struct{}, 1),
 		pk:       newPicker(t, have),
 		conns:    make(map[*peerConn]bool),
+		verified: make(map[string]int64),
 		peerIDs:  make(map[[20]byte]bool),
 		known:    make(map[string]time.Time),
 		queued:   make(map[string]*candidate),
@@ -175,6 +178,28 @@ type Stats struct {
 	Left                 int64
 	Peers                int
 	EncryptedPeers       int
+}
+
+// VerifiedFrom returns how many bytes of verified pieces each peer sent,
+// keyed by IP address.
+func (c *Client) VerifiedFrom() map[string]int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return maps.Clone(c.verified)
+}
+
+// PeerAddrs returns the listening addresses of connected peers that told us
+// theirs, so others can be pointed at them.
+func (c *Client) PeerAddrs() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []string
+	for pc := range c.conns {
+		if pc.listenAddr != "" {
+			out = append(out, pc.listenAddr)
+		}
+	}
+	return out
 }
 
 // Stats returns current progress.
@@ -531,8 +556,12 @@ func (c *Client) pieceDone(i int, ap *activePiece) {
 			c.report(key, reputation.ProvenBad)
 		}
 		credited := map[string]bool{}
-		for _, b := range ap.blocks {
-			if b.source != nil && !credited[b.source.key] {
+		for j, b := range ap.blocks {
+			if b.source == nil {
+				continue
+			}
+			c.verified[b.source.key] += int64(min(BlockSize, len(ap.buf)-j*BlockSize))
+			if !credited[b.source.key] {
 				credited[b.source.key] = true
 				c.report(b.source.key, reputation.GoodPiece)
 			}
