@@ -2,9 +2,11 @@ package mesh
 
 import (
 	"crypto/ed25519"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -18,6 +20,10 @@ const (
 	MaxChannel = 32
 	// MaxText bounds a message's text in bytes.
 	MaxText = 1024
+	// MaxData bounds the data in a direct data message.
+	MaxData = 1024
+	// MaxShareName bounds a shared file's name in bytes.
+	MaxShareName = 128
 )
 
 // ErrPayload reports a payload that does not follow its type's format.
@@ -120,6 +126,51 @@ func CheckChannel(name string) error {
 func checkText(s string) error {
 	if s == "" || len(s) > MaxText || !printable(s) {
 		return fmt.Errorf("%w: text", ErrPayload)
+	}
+	return nil
+}
+
+// Share is a file someone offers to the mesh, identified by its BitTorrent
+// info-hash. The announcement is signed, so its sender cannot be faked; the
+// content is checked piece by piece against the info-hash when fetched.
+type Share struct {
+	From     Fingerprint
+	Nickname string
+	InfoHash [20]byte
+	Name     string
+	Size     int64
+	Time     time.Time
+}
+
+// sharePayload is a share packet's payload: info-hash, size, name.
+func sharePayload(infoHash [20]byte, name string, size int64) []byte {
+	b := append([]byte(nil), infoHash[:]...)
+	b = binary.BigEndian.AppendUint64(b, uint64(size))
+	b = append(b, byte(len(name)))
+	return append(b, name...)
+}
+
+func parseShare(b []byte) (infoHash [20]byte, name string, size int64, err error) {
+	if len(b) < 29 || len(b) != 29+int(b[28]) {
+		return infoHash, "", 0, fmt.Errorf("%w: share length", ErrPayload)
+	}
+	copy(infoHash[:], b)
+	u := binary.BigEndian.Uint64(b[20:])
+	name = string(b[29:])
+	if u == 0 || u > 1<<53 {
+		return infoHash, "", 0, fmt.Errorf("%w: share size", ErrPayload)
+	}
+	if err := checkShareName(name); err != nil {
+		return infoHash, "", 0, err
+	}
+	return infoHash, name, int64(u), nil
+}
+
+// checkShareName accepts what a torrent's name may be: printable, no path
+// separators, not "." or "..".
+func checkShareName(s string) error {
+	if s == "" || len(s) > MaxShareName || !printable(s) || strings.ContainsAny(s, "/\\\n") || s == "." || s == ".." {
+		return fmt.Errorf("%w: share name %q", ErrPayload, s)
 	}
 	return nil
 }

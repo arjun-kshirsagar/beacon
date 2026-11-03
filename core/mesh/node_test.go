@@ -14,10 +14,12 @@ import (
 // testNode is a node on an in-memory radio that records what it receives.
 type testNode struct {
 	*Node
-	name string
-	mu   sync.Mutex
-	got  []Message
-	ch   chan Message
+	name   string
+	mu     sync.Mutex
+	got    []Message
+	data   []string // "from|data" for each OnData
+	shares []Share
+	ch     chan Message
 }
 
 type testMesh struct {
@@ -57,6 +59,16 @@ func (m *testMesh) create(name string, mod ...func(*Config)) *testNode {
 		default:
 		}
 	}}
+	cfg.OnData = func(from Fingerprint, data []byte) {
+		tn.mu.Lock()
+		tn.data = append(tn.data, string(from)+"|"+string(data))
+		tn.mu.Unlock()
+	}
+	cfg.OnShare = func(s Share) {
+		tn.mu.Lock()
+		tn.shares = append(tn.shares, s)
+		tn.mu.Unlock()
+	}
 	for _, f := range mod {
 		f(&cfg)
 	}

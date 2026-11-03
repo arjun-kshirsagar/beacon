@@ -26,6 +26,8 @@ type vectors struct {
 	Handshake       string   `json:"handshake_packet"`
 	EncryptedAD     string   `json:"encrypted_associated_data"`
 	PaddedText      string   `json:"padded_plaintext"`
+	Share           string   `json:"share_packet"`
+	PaddedData      string   `json:"padded_data_plaintext"`
 }
 
 func buildVectors(t *testing.T) vectors {
@@ -55,6 +57,8 @@ func buildVectors(t *testing.T) vectors {
 	hs.Recipient = &recipient
 	enc := base(TypeEncrypted, nil)
 	enc.Recipient = &recipient
+	sh := base(TypeShare, sharePayload([20]byte{0x58, 0x9b, 0xd9, 0xd4}, "photos.bin", 5_000_000))
+	sh.Sign(id.sign)
 	noiseKey := id.NoiseKey()
 	return vectors{
 		IdentityPrivate: hex.EncodeToString(seed),
@@ -68,6 +72,8 @@ func buildVectors(t *testing.T) vectors {
 		Handshake:       hex.EncodeToString(hs.Encode()),
 		EncryptedAD:     hex.EncodeToString(enc.header()),
 		PaddedText:      hex.EncodeToString(padText("hi")),
+		Share:           hex.EncodeToString(sh.Encode()),
+		PaddedData:      hex.EncodeToString(padInner(innerData, []byte{0x01, 0x02})),
 	}
 }
 
@@ -94,7 +100,7 @@ func TestVectors(t *testing.T) {
 		t.Fatalf("encodings differ from %s; if the wire format changed on purpose, update docs/protocol-spec.md, bump Version if needed, and run go test -update", path)
 	}
 	// The stored packets must also parse and verify.
-	for _, h := range []string{want.Announce, want.Channel} {
+	for _, h := range []string{want.Announce, want.Channel, want.Share} {
 		b, _ := hex.DecodeString(h)
 		p, err := ParsePacket(b)
 		if err != nil {

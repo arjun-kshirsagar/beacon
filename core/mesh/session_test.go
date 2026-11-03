@@ -208,3 +208,89 @@ func TestIdentityProof(t *testing.T) {
 		t.Fatal("wipe left key material")
 	}
 }
+
+func TestSharesAndData(t *testing.T) {
+	m := newMesh(t, 185)
+	nodes := m.line("f", 3)
+	a, b, c := nodes[0], nodes[1], nodes[2]
+	c.waitPeers(t, 2)
+	a.waitPeers(t, 2)
+
+	ih := [20]byte{1, 2, 3}
+	if err := a.SendShare(ih, "holiday.mp4", 50<<20); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"", "../etc", "a/b", ".."} {
+		if a.SendShare(ih, bad, 1) == nil {
+			t.Fatalf("share named %q accepted", bad)
+		}
+	}
+	waitFor := func(what string, cond func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for !cond() {
+			if time.Now().After(deadline) {
+				t.Fatal("timed out waiting for " + what)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	waitFor("share", func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return len(c.shares) == 1
+	})
+	c.mu.Lock()
+	s := c.shares[0]
+	c.mu.Unlock()
+	if s.From != a.Fingerprint() || s.Nickname != "f0" || s.InfoHash != ih || s.Name != "holiday.mp4" || s.Size != 50<<20 {
+		t.Fatalf("share %+v", s)
+	}
+
+	// Data goes, encrypted, to one peer only and never shows up as text.
+	if err := c.SendDirectData(a.Fingerprint(), []byte{0x01, 0xff, 0x00}); err != nil {
+		t.Fatal(err)
+	}
+	want := string(c.Fingerprint()) + "|" + string([]byte{0x01, 0xff, 0x00})
+	waitFor("data", func() bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return len(a.data) == 1 && a.data[0] == want
+	})
+	time.Sleep(50 * time.Millisecond)
+	b.mu.Lock()
+	leaked := len(b.data) + len(b.got)
+	b.mu.Unlock()
+	a.mu.Lock()
+	asText := len(a.got)
+	a.mu.Unlock()
+	if leaked != 0 || asText != 0 {
+		t.Fatalf("data delivered elsewhere: relay %d, as text %d", leaked, asText)
+	}
+	if c.SendDirectData(a.Fingerprint(), nil) == nil || c.SendDirectData(a.Fingerprint(), make([]byte, MaxData+1)) == nil {
+		t.Fatal("bad data length accepted")
+	}
+}
+
+func TestParseShare(t *testing.T) {
+	ih := [20]byte{9}
+	gotIH, name, size, err := parseShare(sharePayload(ih, "a.iso", 7))
+	if err != nil || gotIH != ih || name != "a.iso" || size != 7 {
+		t.Fatal("round trip", err)
+	}
+	for _, bad := range [][]byte{nil, make([]byte, 28), sharePayload(ih, "x", 0), sharePayload(ih, "a\\b", 1),
+		append(sharePayload(ih, "x", 1), 0)} {
+		if _, _, _, err := parseShare(bad); err == nil {
+			t.Errorf("%x accepted", bad)
+		}
+	}
+	if k, body, err := unpadInner(padInner(innerData, []byte{0})); err != nil || k != innerData || len(body) != 1 {
+		t.Fatal("data round trip")
+	}
+	if _, _, err := unpadInner(padInner(innerData, nil)); err == nil {
+		t.Fatal("empty data accepted")
+	}
+	if _, err := unpadText(padInner(innerData, []byte("x"))); err == nil {
+		t.Fatal("data read as text")
+	}
+}

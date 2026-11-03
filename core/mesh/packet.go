@@ -37,6 +37,7 @@ const (
 	TypeChannel   Type = 0x02 // public channel message; broadcast, signed
 	TypeHandshake Type = 0x03 // Noise XX handshake message; directed
 	TypeEncrypted Type = 0x04 // Noise transport message; directed
+	TypeShare     Type = 0x05 // a file offered to the mesh; broadcast, signed
 )
 
 func (t Type) String() string {
@@ -49,15 +50,17 @@ func (t Type) String() string {
 		return "handshake"
 	case TypeEncrypted:
 		return "encrypted"
+	case TypeShare:
+		return "share"
 	}
 	return fmt.Sprintf("type(%#x)", uint8(t))
 }
 
-func (t Type) valid() bool { return t >= TypeAnnounce && t <= TypeEncrypted }
+func (t Type) valid() bool { return t >= TypeAnnounce && t <= TypeShare }
 
 // signed reports whether packets of type t must carry a signature, and
 // directed whether they must carry a recipient.
-func (t Type) signed() bool   { return t == TypeAnnounce || t == TypeChannel }
+func (t Type) signed() bool   { return t == TypeAnnounce || t == TypeChannel || t == TypeShare }
 func (t Type) directed() bool { return t == TypeHandshake || t == TypeEncrypted }
 
 // PeerID is a node's ephemeral, rotating mesh address.

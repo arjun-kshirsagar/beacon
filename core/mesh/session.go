@@ -24,6 +24,7 @@ const (
 	maxSessions      = 256
 	replayWindow     = 256
 	innerText        = 0x01
+	innerData        = 0x02
 )
 
 var (
@@ -72,7 +73,8 @@ type responder struct {
 }
 
 type queued struct {
-	text string
+	kind byte
+	body []byte
 	at   time.Time
 }
 
@@ -94,12 +96,25 @@ func (n *Node) SendDirect(fp Fingerprint, text string) error {
 	if err := checkText(text); err != nil {
 		return err
 	}
+	return n.sendDirect(fp, innerText, []byte(text))
+}
+
+// SendDirectData sends up to MaxData bytes, end-to-end encrypted, to the peer
+// with fingerprint fp, for its OnData. It is for protocols layered on the mesh.
+func (n *Node) SendDirectData(fp Fingerprint, data []byte) error {
+	if len(data) == 0 || len(data) > MaxData {
+		return fmt.Errorf("%w: data length %d", ErrPayload, len(data))
+	}
+	return n.sendDirect(fp, innerData, append([]byte(nil), data...))
+}
+
+func (n *Node) sendDirect(fp Fingerprint, kind byte, body []byte) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	d := &n.dm
 	if s := d.sessions[fp]; s != nil {
 		id := n.peerIDLocked(fp, s.peerID)
-		return n.sendEncryptedLocked(s, id, text)
+		return n.sendEncryptedLocked(s, id, kind, body)
 	}
 	id, ok := n.latestID(fp)
 	if !ok {
@@ -108,7 +123,7 @@ func (n *Node) SendDirect(fp Fingerprint, text string) error {
 	if len(d.outbox[fp]) >= maxOutbox {
 		return ErrOutboxFull
 	}
-	d.outbox[fp] = append(d.outbox[fp], queued{text: text, at: n.cfg.Now()})
+	d.outbox[fp] = append(d.outbox[fp], queued{kind: kind, body: body, at: n.cfg.Now()})
 	// A handshake either way will flush the outbox when it completes.
 	if d.initiators[fp] == nil && d.responders[id] == nil {
 		n.startHandshakeLocked(fp, id, 0)
@@ -149,8 +164,8 @@ func (n *Node) startHandshakeLocked(fp Fingerprint, to PeerID, tries int) {
 	n.originateLocked(&Packet{Type: TypeHandshake, Recipient: &to, Payload: msg})
 }
 
-func (n *Node) sendEncryptedLocked(s *session, to PeerID, text string) error {
-	plain := padText(text)
+func (n *Node) sendEncryptedLocked(s *session, to PeerID, kind byte, body []byte) error {
+	plain := padInner(kind, body)
 	p := &Packet{Type: TypeEncrypted, Recipient: &to}
 	n.stampLocked(p)
 	payload := binary.BigEndian.AppendUint64(nil, s.sendN)
@@ -165,8 +180,9 @@ func (n *Node) sendEncryptedLocked(s *session, to PeerID, text string) error {
 	return nil
 }
 
-func padText(text string) []byte {
-	need := 3 + len(text)
+// padInner builds a direct message's plaintext: kind, length, body, padding.
+func padInner(kind byte, body []byte) []byte {
+	need := 3 + len(body)
 	size := paddedSizes[len(paddedSizes)-1]
 	for _, s := range paddedSizes {
 		if s >= need {
@@ -175,22 +191,41 @@ func padText(text string) []byte {
 		}
 	}
 	b := make([]byte, size)
-	b[0] = innerText
-	binary.BigEndian.PutUint16(b[1:], uint16(len(text)))
-	copy(b[3:], text)
+	b[0] = kind
+	binary.BigEndian.PutUint16(b[1:], uint16(len(body)))
+	copy(b[3:], body)
 	return b
 }
 
-func unpadText(b []byte) (string, error) {
-	if len(b) < 3 || b[0] != innerText {
-		return "", fmt.Errorf("%w: inner message", ErrPayload)
+func padText(text string) []byte { return padInner(innerText, []byte(text)) }
+
+// unpadInner checks a direct message's plaintext and returns its kind and body.
+func unpadInner(b []byte) (byte, []byte, error) {
+	if len(b) < 3 || b[0] != innerText && b[0] != innerData {
+		return 0, nil, fmt.Errorf("%w: inner message", ErrPayload)
 	}
 	n := int(binary.BigEndian.Uint16(b[1:]))
 	if n > len(b)-3 {
-		return "", fmt.Errorf("%w: inner length", ErrPayload)
+		return 0, nil, fmt.Errorf("%w: inner length", ErrPayload)
 	}
-	text := string(b[3 : 3+n])
-	return text, checkText(text)
+	body := b[3 : 3+n]
+	switch b[0] {
+	case innerText:
+		return innerText, body, checkText(string(body))
+	default:
+		if n == 0 || n > MaxData {
+			return 0, nil, fmt.Errorf("%w: data length", ErrPayload)
+		}
+		return innerData, append([]byte(nil), body...), nil
+	}
+}
+
+func unpadText(b []byte) (string, error) {
+	kind, body, err := unpadInner(b)
+	if err == nil && kind != innerText {
+		err = fmt.Errorf("%w: not text", ErrPayload)
+	}
+	return string(body), err
 }
 
 // handle processes a directed packet addressed to us.
@@ -325,7 +360,7 @@ func (d *dmState) establish(n *Node, fp Fingerprint, peerID PeerID, hs *noise.Ha
 	d.idToFP[peerID] = fp
 	n.log.Debug("session established", "peer", fp.Short())
 	for _, q := range d.outbox[fp] {
-		n.sendEncryptedLocked(s, peerID, q.text)
+		n.sendEncryptedLocked(s, peerID, q.kind, q.body)
 	}
 	delete(d.outbox, fp)
 }
@@ -376,16 +411,19 @@ func (d *dmState) handleEncrypted(n *Node, p *Packet, now time.Time) []Message {
 	s.used = now
 	s.peerID = p.Sender
 	d.idToFP[p.Sender] = fp
-	text, err := unpadText(plain)
+	kind, body, err := unpadInner(plain)
 	if err != nil {
 		return nil
 	}
 	n.stats.Delivered++
+	if kind == innerData {
+		return []Message{{From: fp, Time: p.Time, data: body}}
+	}
 	nick := ""
 	if peer := n.peers[p.Sender]; peer != nil {
 		nick = peer.nickname
 	}
-	return []Message{{From: fp, Nickname: nick, Text: text, Time: p.Time}}
+	return []Message{{From: fp, Nickname: nick, Text: string(body), Time: p.Time}}
 }
 
 // tick retries stalled handshakes and expires old state.

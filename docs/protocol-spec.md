@@ -146,6 +146,7 @@ Types:
 | `0x02` | channel message | no | yes |
 | `0x03` | Noise handshake | yes | no |
 | `0x04` | Noise transport (encrypted) | yes | no |
+| `0x05` | file share | no | yes |
 
 A packet whose recipient or signature flag does not match its type, whose TTL
 is over 7, whose version or type is unknown, or whose length does not match
@@ -226,6 +227,24 @@ announce yet is held (up to 8 per sender, 64 senders, for 1 minute) and
 delivered if the announce arrives. A relay that knows the sender's key drops a
 message whose signature fails and does not relay it.
 
+### File share (`0x05`)
+
+| Size | Field |
+|---|---|
+| 20 | BitTorrent info-hash (BEP 3) |
+| 8 | total size in bytes, 1 to 2^53 |
+| 1 | name length *n*, 1–128 |
+| *n* | name, UTF-8, no control characters, no `/` or `\`, not `.` or `..` |
+
+A node sends a share to tell the mesh it can serve a file. Shares are signed
+and handled like channel messages (held until the sender's announce arrives,
+dropped if the signature fails). The info-hash commits to every piece, so the
+name and size are only labels: a receiver verifies the content itself when it
+fetches it (see "Offline file transfer").
+
+Type `0x05` was added within version 1. Nodes from before it drop such
+packets as malformed and do not relay them.
+
 ### Noise handshake (`0x03`)
 
 | Size | Field |
@@ -280,10 +299,14 @@ The plaintext is:
 
 | Size | Field |
 |---|---|
-| 1 | kind, `0x01` for text |
-| 2 | text length *n* |
-| *n* | text, under the same rules as channel text |
+| 1 | kind: `0x01` text, `0x02` data |
+| 2 | body length *n* |
+| *n* | body |
 | rest | zero padding |
+
+A text body follows the rules for channel text. A data body is 1–1024
+opaque bytes for a protocol layered on the mesh, such as the offline file
+transfer messages below; it is never shown as a message.
 
 The plaintext is padded to the smallest of 64, 128, 256, 512, 1024 or 2048
 bytes that fits, so the ciphertext length reveals only a size class.

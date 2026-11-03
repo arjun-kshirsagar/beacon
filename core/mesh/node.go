@@ -59,7 +59,12 @@ type Config struct {
 	// OnMessage receives channel and direct messages. It is called from the
 	// node's goroutines, one message at a time per link, with no locks held.
 	OnMessage func(Message)
-	Logger    *slog.Logger
+	// OnData receives the data of direct data messages (SendDirectData),
+	// under the same rules as OnMessage.
+	OnData func(from Fingerprint, data []byte)
+	// OnShare receives file announcements (SendShare), under the same rules.
+	OnShare func(Share)
+	Logger  *slog.Logger
 
 	AnnounceEvery time.Duration // default 5 minutes
 	RotateEvery   time.Duration // ephemeral ID lifetime; default 15 minutes
@@ -73,6 +78,9 @@ type Message struct {
 	Channel  string // empty for a direct message
 	Text     string
 	Time     time.Time // when the sender wrote it
+
+	data  []byte // a direct data message, for OnData instead
+	share *Share // a file announcement, for OnShare instead
 }
 
 // Peer is a node heard from on the mesh.
@@ -425,7 +433,16 @@ func (n *Node) attributeLocked(l *link, p *Packet, now time.Time) *link {
 
 func (n *Node) deliver(msgs []Message) {
 	for _, m := range msgs {
-		if n.cfg.OnMessage != nil {
+		switch {
+		case m.share != nil:
+			if n.cfg.OnShare != nil {
+				n.cfg.OnShare(*m.share)
+			}
+		case m.data != nil:
+			if n.cfg.OnData != nil {
+				n.cfg.OnData(m.From, m.data)
+			}
+		case n.cfg.OnMessage != nil:
 			n.cfg.OnMessage(m)
 		}
 	}
@@ -475,8 +492,8 @@ func (n *Node) handleLocked(p *Packet, from *link, now time.Time) []Message {
 	switch p.Type {
 	case TypeAnnounce:
 		return n.flushPending(p.Sender, now)
-	case TypeChannel:
-		return n.handleChannel(p, from, now)
+	case TypeChannel, TypeShare:
+		return n.handleSigned(p, from, now)
 	}
 	return nil
 }
@@ -598,7 +615,8 @@ func (n *Node) evictPeer() {
 	delete(n.peers, oldest)
 }
 
-func (n *Node) handleChannel(p *Packet, from *link, now time.Time) []Message {
+// handleSigned delivers a signed broadcast: a channel message or a share.
+func (n *Node) handleSigned(p *Packet, from *link, now time.Time) []Message {
 	peer := n.peers[p.Sender]
 	if peer == nil {
 		// Its announce may still be on the way; hold the packet briefly.
@@ -607,6 +625,16 @@ func (n *Node) handleChannel(p *Packet, from *link, now time.Time) []Message {
 			n.pending[p.Sender] = append(q, pendingPacket{p: p, from: from, at: now})
 		}
 		return nil
+	}
+	if p.Type == TypeShare {
+		ih, name, size, err := parseShare(p.Payload)
+		if err != nil {
+			n.stats.Dropped++
+			return nil
+		}
+		n.stats.Delivered++
+		return []Message{{From: peer.fp, share: &Share{From: peer.fp, Nickname: peer.nickname,
+			InfoHash: ih, Name: name, Size: size, Time: p.Time}}}
 	}
 	m, err := parseChannelMessage(p.Payload)
 	if err != nil {
@@ -627,7 +655,7 @@ func (n *Node) flushPending(sender PeerID, now time.Time) []Message {
 			n.stats.BadSigned++
 			continue
 		}
-		out = append(out, n.handleChannel(pp.p, pp.from, now)...)
+		out = append(out, n.handleSigned(pp.p, pp.from, now)...)
 	}
 	return out
 }
@@ -661,6 +689,20 @@ func (n *Node) SendChannel(channel, text string) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.originateLocked(&Packet{Type: TypeChannel, Payload: channelMessage{channel: channel, text: text}.encode()})
+	return nil
+}
+
+// SendShare announces a file to the mesh: its info-hash, name and size.
+func (n *Node) SendShare(infoHash [20]byte, name string, size int64) error {
+	if err := checkShareName(name); err != nil {
+		return err
+	}
+	if size <= 0 || size > 1<<53 {
+		return fmt.Errorf("%w: share size", ErrPayload)
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.originateLocked(&Packet{Type: TypeShare, Payload: sharePayload(infoHash, name, size)})
 	return nil
 }
 

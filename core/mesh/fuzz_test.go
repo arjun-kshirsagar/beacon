@@ -15,8 +15,10 @@ func FuzzPayloads(f *testing.F) {
 	f.Add(uint8(1), channelMessage{channel: "#general", text: "hi"}.encode())
 	f.Add(uint8(2), padText("hello"))
 	f.Add(uint8(3), id.identityProof())
+	f.Add(uint8(4), sharePayload([20]byte{1}, "file.bin", 1234))
+	f.Add(uint8(5), padInner(innerData, []byte{1, 2}))
 	f.Fuzz(func(t *testing.T, kind uint8, data []byte) {
-		switch kind % 4 {
+		switch kind % 6 {
 		case 0:
 			if a, err := parseAnnounce(data); err == nil && string(a.encode()) != string(data) {
 				t.Fatal("announce did not round-trip")
@@ -31,6 +33,14 @@ func FuzzPayloads(f *testing.F) {
 			}
 		case 3:
 			checkProof(data, id.NoiseKey())
+		case 4:
+			if ih, name, size, err := parseShare(data); err == nil && string(sharePayload(ih, name, size)) != string(data) {
+				t.Fatal("share did not round-trip")
+			}
+		case 5:
+			if kind, body, err := unpadInner(data); err == nil && (len(body) > MaxData || kind != innerText && kind != innerData) {
+				t.Fatal("bad inner message accepted")
+			}
 		}
 	})
 }
