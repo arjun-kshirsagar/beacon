@@ -25,10 +25,10 @@ const (
 	maxPending     = 8                // unverified packets held per unknown sender
 	maxPendingFrom = 64               // unknown senders with packets held
 	pendingFor     = time.Minute
-	linkQueue      = 512 // packets queued per link before dropping
-	linkRate       = 50  // packets a second accepted from one link
+	linkQueue      = 512           // packets queued per link before dropping
+	linkRate       = 50            // packets a second accepted from one link
 	linkBurst      = 2 * maxStored // room for a neighbour's whole store-and-forward flush
-	senderRate     = 20 // packets a second accepted from one origin
+	senderRate     = 20            // packets a second accepted from one origin
 	senderBurst    = 100
 	maxSenders     = 4096
 	seenPerGen     = 16384
