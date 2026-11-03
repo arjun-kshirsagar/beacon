@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Beacon</string>
+    <string name="channel_name">Mesh</string>
+    <string name="notification_title">Beacon is relaying</string>
+    <string name="notification_text">Passing messages for people nearby</string>
+</resources>
