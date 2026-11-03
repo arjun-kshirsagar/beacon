@@ -45,13 +45,15 @@ func parseAnnounce(b []byte) (announce, error) {
 	a := announce{signKey: append(ed25519.PublicKey(nil), b[:ed25519.PublicKeySize]...)}
 	copy(a.noiseKey[:], b[ed25519.PublicKeySize:])
 	a.nickname = string(b[keys+1:])
-	if err := checkNickname(a.nickname); err != nil {
+	if err := CheckNickname(a.nickname); err != nil {
 		return announce{}, err
 	}
 	return a, nil
 }
 
-func checkNickname(s string) error {
+// CheckNickname reports whether s is a valid nickname: 1 to 32 bytes of
+// printable UTF-8.
+func CheckNickname(s string) error {
 	if s == "" || len(s) > MaxNickname || !printable(s) {
 		return fmt.Errorf("%w: nickname %q", ErrPayload, s)
 	}

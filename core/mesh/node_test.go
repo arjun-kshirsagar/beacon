@@ -372,7 +372,7 @@ func TestPayloadValidation(t *testing.T) {
 		}
 	}
 	for _, nick := range []string{"", "a\x00b", "bad‮nick", string([]byte{0xff})} {
-		if checkNickname(nick) == nil {
+		if CheckNickname(nick) == nil {
 			t.Errorf("nickname %q accepted", nick)
 		}
 	}

@@ -127,7 +127,7 @@ func New(cfg Config) (*Node, error) {
 	if cfg.Identity == nil || cfg.Links == nil {
 		return nil, errors.New("mesh: Identity and Links are required")
 	}
-	if err := checkNickname(cfg.Nickname); err != nil {
+	if err := CheckNickname(cfg.Nickname); err != nil {
 		return nil, err
 	}
 	if cfg.AnnounceEvery <= 0 {

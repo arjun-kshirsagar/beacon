@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,6 +177,7 @@ func (sf *swarmFlags) open(ctx context.Context) (netOpts, error) {
 type swarm struct {
 	t    *torrent.Torrent
 	c    *engine.Client
+	port uint16
 	stop func()
 }
 
@@ -191,6 +193,9 @@ func joinSwarm(ctx context.Context, t *torrent.Torrent, dir string, o netOpts) (
 	l, err := tr.Listen(fmt.Sprintf(":%d", port))
 	if err != nil {
 		return nil, err
+	}
+	if port == 0 { // any free port, as chat shares use
+		port = uint16(l.Addr().(*net.TCPAddr).Port)
 	}
 	store, err := engine.OpenStorage(dir, t)
 	if err != nil {
@@ -224,7 +229,7 @@ func joinSwarm(ctx context.Context, t *torrent.Torrent, dir string, o netOpts) (
 	log.Info("joined swarm", "name", t.Name, "port", port, "trackers", len(d.trackers),
 		"dht", node != nil, "lpd", local != nil, "private", t.Private)
 
-	return &swarm{t: t, c: c, stop: func() {
+	return &swarm{t: t, c: c, port: port, stop: func() {
 		cancel()
 		for range 3 {
 			<-done

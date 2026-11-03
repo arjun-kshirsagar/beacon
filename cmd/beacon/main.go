@@ -19,6 +19,8 @@ Commands:
   info      show what a .torrent contains
   get       download a .torrent or magnet link, seeding while it downloads
   seed      upload a complete torrent to other peers
+  chat      chat and share files with people on the local network
+  tui       the same, in a full-screen terminal interface
   version   print the version
 
 Run "beacon <command> -h" for a command's flags.
@@ -54,6 +56,8 @@ func run(ctx context.Context, args []string) error {
 		return cmdGet(ctx, args[1:])
 	case "seed":
 		return cmdSeed(ctx, args[1:])
+	case "chat":
+		return cmdChat(ctx, args[1:])
 	case "version":
 		fmt.Println("beacon", version)
 		return nil
