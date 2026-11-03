@@ -58,6 +58,8 @@ func run(ctx context.Context, args []string) error {
 		return cmdSeed(ctx, args[1:])
 	case "chat":
 		return cmdChat(ctx, args[1:])
+	case "tui":
+		return cmdTUI(ctx, args[1:])
 	case "version":
 		fmt.Println("beacon", version)
 		return nil
