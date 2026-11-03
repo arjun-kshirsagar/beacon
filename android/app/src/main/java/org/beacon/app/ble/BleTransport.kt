@@ -1,6 +1,7 @@
 package org.beacon.app.ble
 
 import android.annotation.SuppressLint
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
@@ -19,7 +20,10 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.ParcelUuid
 import android.util.Log
@@ -53,17 +57,57 @@ class BleTransport(private val context: Context, private val node: Node) {
     private val serverMtu = ConcurrentHashMap<String, Int>()
     private val clients = ConcurrentHashMap<String, ClientPeer>() // our connections to their servers
     @Volatile private var running = false
+    @Volatile private var wanted = false // start() was called and stop() was not
+    private var watching = false
 
     /** Live links, for the UI. */
     val linkCount: Int get() = servers.size + clients.values.count { it.link != null }
 
+    /**
+     * Turning Bluetooth off (directly or by flight mode) discards our GATT
+     * server, advertisement and scan without any callback, so we drop the
+     * links when it goes off and set everything up again when it comes back.
+     */
+    private val stateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, intent: Intent) {
+            when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1)) {
+                BluetoothAdapter.STATE_TURNING_OFF, BluetoothAdapter.STATE_OFF -> if (running) {
+                    Log.i(TAG, "Bluetooth turned off; dropping links")
+                    teardown()
+                }
+                BluetoothAdapter.STATE_ON -> if (wanted && !running) {
+                    Log.i(TAG, "Bluetooth is back on; restarting")
+                    bringUp()
+                }
+            }
+        }
+    }
+
+    @Synchronized
     fun start() {
+        wanted = true
+        if (!watching) {
+            val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
+            if (Build.VERSION.SDK_INT >= 33) {
+                context.registerReceiver(stateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                context.registerReceiver(stateReceiver, filter)
+            }
+            watching = true
+        }
+        bringUp()
+    }
+
+    @Synchronized
+    private fun bringUp() {
+        if (running) return
         val adapter = manager.adapter ?: return
         if (!adapter.isEnabled) {
-            Log.w(TAG, "Bluetooth is off")
+            Log.w(TAG, "Bluetooth is off; waiting for it to come on")
             return
         }
         running = true
+        Log.i(TAG, "starting GATT server, advertising and scanning")
         val service = BluetoothGattService(serviceUuid, BluetoothGattService.SERVICE_TYPE_PRIMARY)
         val ch = BluetoothGattCharacteristic(
             framesUuid,
@@ -81,14 +125,27 @@ class BleTransport(private val context: Context, private val node: Node) {
         scan(true)
     }
 
+    @Synchronized
     fun stop() {
+        wanted = false
+        if (watching) {
+            runCatching { context.unregisterReceiver(stateReceiver) }
+            watching = false
+        }
+        teardown()
+    }
+
+    /** Drops every link and releases the radio; safe while Bluetooth is going away. */
+    @Synchronized
+    private fun teardown() {
         running = false
-        scan(false)
+        runCatching { scan(false) }
         runCatching { manager.adapter?.bluetoothLeAdvertiser?.stopAdvertising(advertiseCallback) }
-        clients.values.forEach { it.shut() }
+        clients.values.forEach { runCatching { it.shut() } }
         clients.clear()
         servers.values.forEach { it.link.down() }
         servers.clear()
+        serverMtu.clear()
         runCatching { server?.close() }
         server = null
     }
@@ -206,7 +263,10 @@ class BleTransport(private val context: Context, private val node: Node) {
 
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                servers.remove(device.address)?.link?.down()
+                servers.remove(device.address)?.link?.let {
+                    it.down()
+                    Log.i(TAG, "link down (they disconnected, status $status), $linkCount links")
+                }
                 serverMtu.remove(device.address)
             }
         }
@@ -228,6 +288,7 @@ class BleTransport(private val context: Context, private val node: Node) {
                 val mtu = (serverMtu[addr] ?: DEFAULT_ATT_MTU) - ATT_HEADER
                 peer.link = runCatching { node.linkUp(addr, mtu.toLong(), peer) }.getOrNull() ?: return
                 servers.put(addr, peer)?.link?.down()
+                Log.i(TAG, "link up (they connected), mtu $mtu, $linkCount links")
             } else {
                 servers.remove(addr)?.link?.down()
             }
@@ -300,8 +361,10 @@ class BleTransport(private val context: Context, private val node: Node) {
                 when (newState) {
                     BluetoothProfile.STATE_CONNECTED -> g.discoverServices()
                     BluetoothProfile.STATE_DISCONNECTED -> {
+                        val wasUp = link != null
                         clients.remove(device.address, this@ClientPeer)
                         shut()
+                        if (wasUp) Log.i(TAG, "link down (we lost them, status $status), $linkCount links")
                     }
                 }
             }
@@ -336,7 +399,7 @@ class BleTransport(private val context: Context, private val node: Node) {
                     return
                 }
                 link = runCatching { node.linkUp(device.address, (mtu - ATT_HEADER).toLong(), this@ClientPeer) }.getOrNull()
-                if (link == null) g.disconnect()
+                if (link == null) g.disconnect() else Log.i(TAG, "link up (we connected), mtu ${mtu - ATT_HEADER}, $linkCount links")
             }
 
             override fun onCharacteristicWrite(g: BluetoothGatt, ch: BluetoothGattCharacteristic, status: Int) {
