@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/arjun-kshirsagar/beacon/core/noise"
@@ -33,6 +34,14 @@ const (
 	maxSenders     = 4096
 	seenPerGen     = 16384
 	recentPerGen   = 4096 // packets whose best TTL is remembered, per generation
+)
+
+// Link liveness: an idle link carries a keepalive frame every keepaliveEvery,
+// and a link silent for linkTimeout is closed, so a neighbour whose app died
+// while its radio stayed up does not linger. Variables so tests can shorten them.
+var (
+	keepaliveEvery = 5 * time.Second
+	linkTimeout    = 15 * time.Second
 )
 
 // Config configures a Node. Zero durations pick the defaults.
@@ -94,6 +103,8 @@ type Node struct {
 	senders  *limiter[PeerID]
 	dm       dmState
 	stats    Stats
+
+	keepalive, linkTimeout time.Duration // copied from the package defaults
 }
 
 type peerInfo struct {
@@ -116,10 +127,11 @@ type stored struct {
 }
 
 type link struct {
-	l      transport.Link
-	out    chan []byte
-	tokens bucket
-	done   chan struct{}
+	l        transport.Link
+	out      chan []byte
+	tokens   bucket
+	done     chan struct{}
+	lastRecv atomic.Int64 // unix nanoseconds of the last frame received
 }
 
 // New returns a node. Call Run to start it.
@@ -152,6 +164,7 @@ func New(cfg Config) (*Node, error) {
 		pending: make(map[PeerID][]pendingPacket),
 		senders: newLimiter[PeerID](senderRate, senderBurst, maxSenders),
 	}
+	n.keepalive, n.linkTimeout = keepaliveEvery, linkTimeout
 	n.dm.init()
 	n.myID = randomID()
 	n.prevID = n.myID
@@ -208,7 +221,12 @@ func (n *Node) housekeeping(ctx context.Context) {
 		}
 		n.expireLocked(now)
 		n.dm.tick(n, now)
+		stale := n.staleLinksLocked()
 		n.mu.Unlock()
+		for _, l := range stale {
+			n.log.Debug("link silent; closing", "peer", l.l.Peer())
+			l.l.Close()
+		}
 	}
 }
 
@@ -219,6 +237,7 @@ func (n *Node) addLink(ctx context.Context, tl transport.Link) {
 		return
 	}
 	l := &link{l: tl, out: make(chan []byte, linkQueue), done: make(chan struct{})}
+	l.lastRecv.Store(time.Now().UnixNano())
 	n.mu.Lock()
 	n.links[l] = true
 	// Store-and-forward: a new neighbour gets everything still worth relaying,
@@ -252,19 +271,37 @@ func (n *Node) addLink(ctx context.Context, tl transport.Link) {
 }
 
 func (n *Node) writeLoop(l *link) {
+	idle := time.NewTimer(n.keepalive)
+	defer idle.Stop()
 	for {
+		frames := [][]byte{keepaliveFrame}
 		select {
 		case raw := <-l.out:
-			for _, f := range fragment(raw, l.l.MTU()) {
-				if err := l.l.WriteFrame(f); err != nil {
-					l.l.Close()
-					return
-				}
-			}
+			frames = fragment(raw, l.l.MTU())
+		case <-idle.C:
 		case <-l.done:
 			return
 		}
+		for _, f := range frames {
+			if err := l.l.WriteFrame(f); err != nil {
+				l.l.Close()
+				return
+			}
+		}
+		idle.Reset(n.keepalive)
 	}
+}
+
+// staleLinksLocked returns links that have been silent for linkTimeout.
+func (n *Node) staleLinksLocked() []*link {
+	var out []*link
+	cutoff := time.Now().Add(-n.linkTimeout).UnixNano()
+	for l := range n.links {
+		if l.lastRecv.Load() < cutoff {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 func (n *Node) readLoop(l *link) {
@@ -274,6 +311,7 @@ func (n *Node) readLoop(l *link) {
 		if err != nil {
 			return
 		}
+		l.lastRecv.Store(time.Now().UnixNano())
 		raw, err := asm.add(frame)
 		if err != nil || raw == nil {
 			continue

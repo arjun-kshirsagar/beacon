@@ -28,6 +28,12 @@ in progress, the partial packet is discarded (its tail was lost). Frames
 without the start bit and no packet in progress are discarded. A packet in
 progress larger than `MaxPacket` is discarded.
 
+**Keepalives.** A frame holding only the header `0x03` is an empty packet:
+receivers rebuild nothing from it. A node sends one on any link it has sent
+nothing on for 5 seconds, always between packets, and closes a link it has
+received nothing on for 15 seconds. This drops a neighbour whose app has died
+while its radio connection stayed up.
+
 ### BLE links
 
 Every Beacon device runs a GATT server with one service and advertises it.

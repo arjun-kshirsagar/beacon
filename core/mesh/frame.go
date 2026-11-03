@@ -15,6 +15,10 @@ const (
 
 var errFrame = errors.New("mesh: bad frame sequence")
 
+// keepaliveFrame is a frame holding an empty packet. Receivers rebuild
+// nothing from it; it only shows the link is alive.
+var keepaliveFrame = []byte{frameStart | frameEnd}
+
 // fragment splits packet into frames of at most mtu bytes.
 func fragment(packet []byte, mtu int) [][]byte {
 	chunk := mtu - 1

@@ -380,3 +380,61 @@ func TestPayloadValidation(t *testing.T) {
 		t.Error("channel length past the payload accepted")
 	}
 }
+
+// shortLiveness speeds up keepalives and link timeouts for one test.
+func shortLiveness(t *testing.T) {
+	ke, lt := keepaliveEvery, linkTimeout
+	keepaliveEvery, linkTimeout = 50*time.Millisecond, 300*time.Millisecond
+	t.Cleanup(func() { keepaliveEvery, linkTimeout = ke, lt })
+}
+
+func TestLinkLiveness(t *testing.T) {
+	shortLiveness(t)
+	m := newMesh(t, 185)
+	a, b := m.add("a"), m.add("b")
+	m.connect("a", "b")
+	b.waitPeers(t, 1)
+
+	// A device that links but never sends anything (its app died while the
+	// radio stayed up) is dropped after the timeout.
+	m.rawLink("dead", "a")
+	deadline := time.Now().Add(2 * time.Second)
+	for a.Stats().Links != 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if a.Stats().Links != 2 {
+		t.Fatalf("dead link never came up: %d links", a.Stats().Links)
+	}
+	for a.Stats().Links != 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := a.Stats().Links; n != 1 {
+		t.Fatalf("silent link not dropped: %d links", n)
+	}
+
+	// Two idle nodes keep their link through many timeouts, thanks to
+	// keepalives, and still carry messages.
+	time.Sleep(5 * linkTimeout)
+	if a.Stats().Links != 1 || b.Stats().Links != 1 {
+		t.Fatalf("idle honest link dropped: a %d, b %d", a.Stats().Links, b.Stats().Links)
+	}
+	a.SendChannel("#general", "still here")
+	b.waitFor(t, "still here", 2*time.Second)
+}
+
+func TestKeepaliveFrameIsIgnored(t *testing.T) {
+	var a assembler
+	if p, err := a.add(keepaliveFrame); p != nil || err != nil {
+		t.Fatalf("keepalive gave %x, %v", p, err)
+	}
+	// It never interrupts a packet: the write loop sends it only between
+	// packets, and a whole packet still assembles after one.
+	frames := fragment([]byte("hello, mesh"), 6)
+	var got []byte
+	for _, f := range frames {
+		got, _ = a.add(f)
+	}
+	if string(got) != "hello, mesh" {
+		t.Fatalf("packet after keepalive: %q", got)
+	}
+}
