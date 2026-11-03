@@ -58,7 +58,7 @@ govulncheck ./...              # known-vulnerability scan
 Android (from `android/`):
 
 ```bash
-gomobile bind -target=android -androidapi 26 -o android/libs/core.aar ./mobile   # run from repo root
+./scripts/build-aar.sh    # gomobile bind ./mobile into android/app/libs/core.aar; run from repo root
 ./gradlew assembleDebug
 ./gradlew test
 ```
