@@ -1,6 +1,7 @@
 package org.beacon.app
 
 import org.json.JSONArray
+import org.json.JSONObject
 
 /** The public channel everyone joins. */
 const val GENERAL = "#general"
@@ -61,3 +62,6 @@ class Conversations(private val maxPerConversation: Int = 500) {
 
     fun clear() = byKey.clear()
 }
+
+/** Reads the relayed-packet count from Node.statsJSON(). */
+fun parseRelayed(json: String): Long = runCatching { JSONObject(json).optLong("Relayed") }.getOrDefault(0)

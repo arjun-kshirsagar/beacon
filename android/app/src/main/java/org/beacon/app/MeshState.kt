@@ -26,6 +26,10 @@ object MeshState : Listener {
     private val _links = MutableStateFlow(0)
     val links: StateFlow<Int> = _links.asStateFlow()
 
+    private val _relayed = MutableStateFlow(0L)
+    /** Packets this phone has passed on for others. */
+    val relayed: StateFlow<Long> = _relayed.asStateFlow()
+
     @Volatile
     var node: Node? = null
         private set
@@ -53,6 +57,7 @@ object MeshState : Listener {
         val n = node ?: return
         _peers.value = parsePeers(n.peersJSON())
         _links.value = linkCount
+        _relayed.value = parseRelayed(n.statsJSON())
     }
 
     private fun record(m: ChatMessage) {

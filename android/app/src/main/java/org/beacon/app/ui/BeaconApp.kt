@@ -157,6 +157,7 @@ private fun NearbyScreen(onMessage: (PeerInfo) -> Unit, onWipe: () -> Unit) {
     val me by MeshState.me.collectAsState()
     val peers by MeshState.peers.collectAsState()
     val links by MeshState.links.collectAsState()
+    val relayed by MeshState.relayed.collectAsState()
     var confirmWipe by remember { mutableStateOf(false) }
     LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
@@ -168,7 +169,8 @@ private fun NearbyScreen(onMessage: (PeerInfo) -> Unit, onWipe: () -> Unit) {
                         Text(it.fingerprint.chunked(4).joinToString(" "), fontFamily = FontFamily.Monospace,
                             style = MaterialTheme.typography.bodySmall)
                     }
-                    Text("$links Bluetooth link${if (links == 1) "" else "s"}", style = MaterialTheme.typography.labelSmall)
+                    Text("$links Bluetooth link${if (links == 1) "" else "s"} · relayed $relayed packets for others",
+                        style = MaterialTheme.typography.labelSmall)
                 }
             }
         }

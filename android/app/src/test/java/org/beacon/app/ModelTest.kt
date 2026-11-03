@@ -39,4 +39,10 @@ class ModelTest {
         assertEquals(fpA, dmFingerprint(dmKey(fpA)))
         assertEquals("aaaa aaaa aaaa aaaa", shortFingerprint(fpA))
     }
+
+    @Test
+    fun readsRelayedCount() {
+        assertEquals(12L, parseRelayed("""{"Links":2,"Relayed":12}"""))
+        assertEquals(0L, parseRelayed("garbage"))
+    }
 }
