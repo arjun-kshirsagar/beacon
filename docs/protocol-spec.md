@@ -363,6 +363,12 @@ The flow:
    so later requesters are pointed at it as well and fetch from several
    devices at once.
 
+**Fake announcements.** If an announcer sends no offer within 30 seconds, or
+its offer leads nowhere (no reachable peers, or the metadata or data cannot
+be fetched), the requester forgets that announcer's share of the file and
+counts a strike. After 3 strikes within an hour, every share from that
+fingerprint is ignored until an hour passes without a new strike.
+
 A device is in at most one group at a time; an offer for a different group
 than the one it is in is declined. Anyone on the mesh can ask for an
 announced file and so learn the group's credentials: joining a group gives

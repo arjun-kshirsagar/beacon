@@ -39,7 +39,6 @@ import (
 )
 
 const (
-	askTimeout      = 30 * time.Second // wait for an offer before asking someone else
 	joinTimeout     = 60 * time.Second // wait to join a group
 	metadataTimeout = 60 * time.Second
 	maxSeen         = 256       // shares remembered
@@ -47,6 +46,10 @@ const (
 	requestsPerMin  = 10        // requests answered per asker
 	pieceLength     = 256 << 10 // for files we share
 )
+
+// askTimeout is how long to wait for an offer before asking someone else; a
+// variable so tests can shorten it.
+var askTimeout = 30 * time.Second
 
 // Groups controls the local group network. Calls must not block: the platform
 // answers with Service.GroupReady or Service.GroupFailed.
@@ -89,6 +92,7 @@ type Service struct {
 	fetches  map[[20]byte]*fetch
 	group    *group
 	requests map[mesh.Fingerprint][]time.Time
+	strikes  map[mesh.Fingerprint]*strike
 }
 
 type seenShare struct {
@@ -108,14 +112,15 @@ type swarm struct {
 }
 
 type fetch struct {
-	infoHash [20]byte
-	name     string
-	state    string
-	asked    mesh.Fingerprint
-	tried    map[mesh.Fingerprint]bool
-	timer    *time.Timer
-	peers    []netip.AddrPort // from the offer, while joining
-	err      error
+	infoHash  [20]byte
+	name      string
+	state     string
+	asked     mesh.Fingerprint
+	tried     map[mesh.Fingerprint]bool
+	timer     *time.Timer
+	peers     []netip.AddrPort // from the offer, while joining
+	offeredBy mesh.Fingerprint // whose offer we followed
+	err       error
 }
 
 type group struct {
@@ -140,7 +145,8 @@ func New(cfg Config) *Service {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Service{cfg: cfg, log: cfg.Logger, ctx: ctx, cancel: cancel,
 		seen: make(map[[20]byte]*seenShare), swarms: make(map[[20]byte]*swarm),
-		fetches: make(map[[20]byte]*fetch), requests: make(map[mesh.Fingerprint][]time.Time)}
+		fetches: make(map[[20]byte]*fetch), requests: make(map[mesh.Fingerprint][]time.Time),
+		strikes: make(map[mesh.Fingerprint]*strike)}
 }
 
 // Close stops every swarm.
@@ -243,6 +249,9 @@ func (s *Service) OnShare(sh mesh.Share) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.distrustedLocked(sh.From) {
+		return
+	}
 	e := s.seen[sh.InfoHash]
 	if e == nil {
 		if len(s.seen) >= maxSeen {
@@ -403,9 +412,60 @@ func (s *Service) askNextLocked(f *fetch) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.fetches[f.infoHash] == f && f.state == "asking" {
+			s.strikeLocked(f.asked, f.infoHash, "no offer")
 			s.askNextLocked(f)
 		}
 	})
+}
+
+// A device that announces files it then fails to deliver (no offer, or an
+// offer that leads nowhere) gets a strike. Its announcement of that file is
+// forgotten at once, and after maxStrikes it is ignored altogether for a
+// while, so fake announcements cannot keep sending us after nothing.
+const (
+	maxStrikes  = 3
+	strikeReset = time.Hour
+)
+
+type strike struct {
+	count int
+	last  time.Time
+}
+
+func (s *Service) strikeLocked(fp mesh.Fingerprint, ih [20]byte, why string) {
+	if fp == "" {
+		return
+	}
+	st := s.strikes[fp]
+	if st == nil || time.Since(st.last) > strikeReset {
+		if len(s.strikes) >= 1024 {
+			clear(s.strikes)
+		}
+		st = &strike{}
+		s.strikes[fp] = st
+	}
+	st.count++
+	st.last = time.Now()
+	s.log.Info("announcer failed to deliver", "who", fp.Short(), "why", why, "strikes", st.count)
+	forget := func(ih [20]byte, e *seenShare) {
+		delete(e.from, fp)
+		if len(e.from) == 0 && s.swarms[ih] == nil {
+			delete(s.seen, ih)
+		}
+	}
+	if e := s.seen[ih]; e != nil {
+		forget(ih, e)
+	}
+	if st.count >= maxStrikes {
+		for other, e := range s.seen {
+			forget(other, e)
+		}
+	}
+}
+
+func (s *Service) distrustedLocked(fp mesh.Fingerprint) bool {
+	st := s.strikes[fp]
+	return st != nil && st.count >= maxStrikes && time.Since(st.last) <= strikeReset
 }
 
 func (s *Service) handleOffer(from mesh.Fingerprint, o *offer) {
@@ -417,6 +477,7 @@ func (s *Service) handleOffer(from mesh.Fingerprint, o *offer) {
 		return
 	}
 	f.timer.Stop()
+	f.offeredBy = from
 	g := s.group
 	switch {
 	case g != nil && g.network == o.network && g.ready:
@@ -502,6 +563,7 @@ func (s *Service) transferLocked(f *fetch, offered []netip.AddrPort) {
 	}
 	if len(peers) == 0 {
 		f.state, f.err = "failed", errors.New("offline: no peers in the group")
+		s.strikeLocked(f.offeredBy, f.infoHash, "offered no reachable peers")
 		return
 	}
 	f.state, f.peers = "fetching", nil
@@ -511,6 +573,7 @@ func (s *Service) transferLocked(f *fetch, offered []netip.AddrPort) {
 		defer s.mu.Unlock()
 		if err != nil && s.ctx.Err() == nil {
 			f.state, f.err = "failed", err
+			s.strikeLocked(f.offeredBy, f.infoHash, err.Error())
 			s.log.Warn("download failed", "name", f.name, "err", err)
 		}
 	}()

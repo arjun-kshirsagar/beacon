@@ -261,3 +261,50 @@ func FuzzParseMessage(f *testing.F) {
 		}
 	})
 }
+
+// TestFakeAnnouncements: a device that announces files and never delivers
+// them loses each announcement at once, and after three failures everything
+// it announces is ignored.
+func TestFakeAnnouncements(t *testing.T) {
+	old := askTimeout
+	askTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { askTimeout = old })
+
+	fm := &fakeMesh{nodes: map[mesh.Fingerprint]*device{}}
+	bob := newDevice(t, fm, transport.NewMemory(), "bob", "10.0.0.2")
+	share := func(from string, ih byte) {
+		bob.svc.OnShare(mesh.Share{From: mesh.Fingerprint(from), Nickname: from, InfoHash: [20]byte{ih},
+			Name: fmt.Sprint("file", ih), Size: 100, Time: time.Now()})
+	}
+	seen := func(ih byte) bool {
+		for _, s := range bob.svc.Seen() {
+			if s.InfoHash == fmt.Sprintf("%x", [20]byte{ih}) {
+				return true
+			}
+		}
+		return false
+	}
+	share("alice", 9)
+	for ih := byte(1); ih <= 3; ih++ {
+		share("mallory", ih)
+	}
+	for ih := byte(1); ih <= 3; ih++ {
+		if err := bob.svc.Get([20]byte{ih}); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for seen(ih) {
+			if time.Now().After(deadline) {
+				t.Fatalf("file %d still listed after mallory failed to deliver it", ih)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	share("mallory", 4)
+	if seen(4) {
+		t.Fatal("a distrusted announcer's new share was listed")
+	}
+	if !seen(9) {
+		t.Fatal("an honest announcer's share was dropped")
+	}
+}
