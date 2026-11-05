@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/arjun-kshirsagar/beacon/core/mesh"
 )
 
 func TestLoadIdentity(t *testing.T) {
@@ -61,5 +63,18 @@ func TestEventFormat(t *testing.T) {
 		if got := tt.e.format(); got != tt.want {
 			t.Errorf("%q, want %q", got, tt.want)
 		}
+	}
+}
+
+func TestTagIfShared(t *testing.T) {
+	alice := mesh.Fingerprint("aaaa1111")
+	mallory := mesh.Fingerprint("bbbb2222")
+	peers := []mesh.Peer{{Fingerprint: alice, Nickname: "alice"}}
+	if got := tagIfShared(alice, "alice", peers); got != "alice" {
+		t.Fatalf("unique nickname shown as %q", got)
+	}
+	peers = append(peers, mesh.Peer{Fingerprint: mallory, Nickname: "alice"})
+	if a, m := tagIfShared(alice, "alice", peers), tagIfShared(mallory, "alice", peers); a != "alice#aaaa" || m != "alice#bbbb" {
+		t.Fatalf("shared nickname shown as %q and %q", a, m)
 	}
 }

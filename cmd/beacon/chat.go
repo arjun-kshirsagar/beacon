@@ -28,6 +28,7 @@ const chatHelp = `Commands:
   /join #channel         switch channel
   /msg <name> <text>     encrypted direct message (name or fingerprint prefix)
   /peers                 who is nearby
+  /stats                 mesh counters (relayed, rate-limited, bad signatures…)
   /whoami                your fingerprint
   /share <path>          share a file or directory with the current channel
   /shares                files shared with you
@@ -180,7 +181,7 @@ func startChat(ctx context.Context, cf *chatFlags, logOut io.Writer) (*chat, err
 		log.Warn("local peer discovery unavailable", "err", err)
 	}
 	if *cf.dht {
-		if c.net.node, err = startDHT(ctx, 0, log); err != nil {
+		if c.net.node, err = startDHT(ctx, 0, nil, log); err != nil {
 			return nil, err
 		}
 	}
@@ -213,15 +214,31 @@ func (c *chat) emit(e event) {
 }
 
 func (c *chat) onMessage(m mesh.Message) {
-	e := event{Time: m.Time, Kind: "dm", From: m.Nickname, Text: m.Text}
+	e := event{Time: m.Time, Kind: "dm", From: c.displayName(m.From, m.Nickname), Text: m.Text}
 	if m.Channel != "" {
 		e.Kind, e.Channel = "channel", m.Channel
 	}
-	if e.From == "" {
-		e.From = m.From.Short()
-	}
 	c.noteShare(e.From, m.Text)
 	c.emit(e)
+}
+
+// displayName is how a sender is shown: the nickname, tagged with the start
+// of the fingerprint when someone else nearby uses the same nickname.
+// Nicknames are free to copy; fingerprints are not.
+func (c *chat) displayName(fp mesh.Fingerprint, nick string) string {
+	if nick == "" {
+		return fp.Short()
+	}
+	return tagIfShared(fp, nick, c.node.Peers())
+}
+
+func tagIfShared(fp mesh.Fingerprint, nick string, peers []mesh.Peer) string {
+	for _, p := range peers {
+		if p.Nickname == nick && p.Fingerprint != fp {
+			return nick + "#" + string(fp[:min(4, len(fp))])
+		}
+	}
+	return nick
 }
 
 // noteShare records a magnet link in a message so /get can refer to it.
@@ -308,6 +325,11 @@ func (c *chat) input(line string) error {
 		}
 		c.channel = rest
 		c.emit(event{Kind: "info", Text: "now talking in " + rest})
+	case "/stats":
+		s := c.node.Stats()
+		c.emit(event{Kind: "info", Text: fmt.Sprintf("links %d, peers %d, delivered %d, relayed %d, duplicates %d, "+
+			"dropped %d, rate-limited %d, bad signatures %d", s.Links, s.Peers, s.Delivered, s.Relayed,
+			s.Duplicates, s.Dropped, s.RateLimited, s.BadSigned)})
 	case "/whoami":
 		c.emit(event{Kind: "info", Text: "fingerprint " + string(c.node.Fingerprint())})
 	case "/peers":

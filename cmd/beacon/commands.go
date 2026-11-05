@@ -121,12 +121,14 @@ func newLogger(verbose bool) *slog.Logger {
 
 // swarmFlags are shared by get and seed.
 type swarmFlags struct {
-	port       *uint
-	noDHT      *bool
-	noLPD      *bool
-	verbose    *bool
-	encryption *string
-	peers      stringList
+	port         *uint
+	noDHT        *bool
+	noLPD        *bool
+	verbose      *bool
+	encryption   *string
+	allowPrivate *bool
+	peers        stringList
+	bootstrap    stringList
 }
 
 func addSwarmFlags(fs *flag.FlagSet) *swarmFlags {
@@ -138,7 +140,10 @@ func addSwarmFlags(fs *flag.FlagSet) *swarmFlags {
 		encryption: fs.String("encryption", "prefer",
 			"peer encryption (MSE): prefer, require, or off"),
 	}
+	sf.allowPrivate = fs.Bool("allow-private", false,
+		"accept private and LAN addresses from the DHT and peer exchange (for private networks)")
 	fs.Var(&sf.peers, "peer", "peer host:port to connect to (repeatable)")
+	fs.Var(&sf.bootstrap, "dht-bootstrap", "DHT node host:port to join through instead of the public routers (repeatable)")
 	return sf
 }
 
@@ -149,19 +154,21 @@ type netOpts struct {
 	lpd   *lpdRouter // nil when local discovery is off
 	peers []string   // extra peers to try
 	enc   engine.Encryption
-	log   *slog.Logger
+	// allowPrivate lets the DHT and PEX supply private addresses.
+	allowPrivate bool
+	log          *slog.Logger
 }
 
 // open turns parsed flags into netOpts, starting the DHT and local discovery
 // unless they are off. Local discovery failing to start is not fatal.
 func (sf *swarmFlags) open(ctx context.Context) (netOpts, error) {
-	o := netOpts{port: uint16(*sf.port), peers: sf.peers, log: newLogger(*sf.verbose)}
+	o := netOpts{port: uint16(*sf.port), peers: sf.peers, log: newLogger(*sf.verbose), allowPrivate: *sf.allowPrivate}
 	var err error
 	if o.enc, err = engine.ParseEncryption(*sf.encryption); err != nil {
 		return o, err
 	}
 	if !*sf.noDHT {
-		if o.node, err = startDHT(ctx, o.port, o.log); err != nil {
+		if o.node, err = startDHT(ctx, o.port, sf.bootstrap, o.log); err != nil {
 			return o, fmt.Errorf("starting DHT: %w", err)
 		}
 	}
@@ -202,7 +209,8 @@ func joinSwarm(ctx context.Context, t *torrent.Torrent, dir string, o netOpts) (
 		l.Close()
 		return nil, err
 	}
-	c, err := engine.New(t, store, engine.Config{Transport: tr, ListenPort: port, Encryption: o.enc, Logger: log})
+	c, err := engine.New(t, store, engine.Config{Transport: tr, ListenPort: port, Encryption: o.enc,
+		AllowPrivatePeers: o.allowPrivate, Logger: log})
 	if err != nil {
 		l.Close()
 		store.Close()
@@ -250,7 +258,7 @@ func resolveMagnet(ctx context.Context, m *torrent.Magnet, o netOpts) (*torrent.
 	// filter as the engine.
 	offer := func(src engine.PeerSource, addrs []string) {
 		for _, a := range addrs {
-			if !engine.AcceptPeerAddr(src, a, false) {
+			if !engine.AcceptPeerAddr(src, a, o.allowPrivate) {
 				continue
 			}
 			select {
@@ -375,4 +383,44 @@ func cmdSeed(ctx context.Context, args []string) error {
 	st := s.c.Stats()
 	log.Info("stopped", "uploaded", st.Uploaded)
 	return nil
+}
+
+// cmdDHT runs a DHT node and nothing else: a bootstrap node for a private
+// network such as the attack-lab testbed.
+func cmdDHT(ctx context.Context, args []string) error {
+	fs := newFlags("dht", "")
+	port := fs.Uint("port", 6881, "UDP port")
+	verbose := fs.Bool("v", false, "verbose logging")
+	var bootstrap stringList
+	fs.Var(&bootstrap, "dht-bootstrap", "DHT node host:port to join through (repeatable); none starts a new network")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
+		return errUsage
+	}
+	log := newLogger(*verbose)
+	n, err := dht.New(dht.Config{Transport: transport.UDP{},
+		Addr: fmt.Sprintf("0.0.0.0:%d", *port), Bootstrap: bootstrap, Logger: log})
+	if err != nil {
+		return err
+	}
+	log.Info("DHT node running", "port", *port, "id", hex.EncodeToString(n.ID().Bytes()))
+	if len(bootstrap) > 0 {
+		go func() {
+			if err := n.Bootstrap(ctx); err != nil && ctx.Err() == nil {
+				log.Warn("bootstrap failed", "err", err)
+			}
+		}()
+	}
+	go func() {
+		t := time.NewTicker(10 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				log.Info("routing table", "nodes", n.NumNodes())
+			}
+		}
+	}()
+	return n.Run(ctx)
 }

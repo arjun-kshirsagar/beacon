@@ -19,6 +19,7 @@ Commands:
   info      show what a .torrent contains
   get       download a .torrent or magnet link, seeding while it downloads
   seed      upload a complete torrent to other peers
+  dht       run a DHT node only (a bootstrap node for private networks)
   chat      chat and share files with people on the local network
   tui       the same, in a full-screen terminal interface
   version   print the version
@@ -56,6 +57,8 @@ func run(ctx context.Context, args []string) error {
 		return cmdGet(ctx, args[1:])
 	case "seed":
 		return cmdSeed(ctx, args[1:])
+	case "dht":
+		return cmdDHT(ctx, args[1:])
 	case "chat":
 		return cmdChat(ctx, args[1:])
 	case "tui":

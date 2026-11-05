@@ -39,13 +39,17 @@ func newTrackerClient() *tracker.Client {
 	return tracker.NewClient(&transport.TCP{}, transport.UDP{})
 }
 
-// startDHT opens a DHT node on the given UDP port and joins the public network
+// startDHT opens a DHT node on the given UDP port and joins the network
+// through bootstrap (the public DHT routers if empty)
 // in the background.
-func startDHT(ctx context.Context, port uint16, log *slog.Logger) (*dht.Node, error) {
+func startDHT(ctx context.Context, port uint16, bootstrap []string, log *slog.Logger) (*dht.Node, error) {
+	if len(bootstrap) == 0 {
+		bootstrap = dht.DefaultBootstrap
+	}
 	n, err := dht.New(dht.Config{
 		Transport: transport.UDP{},
 		Addr:      netip.AddrPortFrom(netip.IPv4Unspecified(), port).String(),
-		Bootstrap: dht.DefaultBootstrap,
+		Bootstrap: bootstrap,
 		Logger:    log,
 	})
 	if err != nil {
