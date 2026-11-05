@@ -69,4 +69,13 @@ class ModelTest {
         assertEquals("shared-file", safeFileName("..."))
         assertEquals("a_b.txt", safeFileName("a\\b.txt"))
     }
+
+    @Test
+    fun tagsSharedNicknames() {
+        val alice = PeerInfo(fpA, "alice", 1)
+        assertEquals("alice", displayName(fpA, "alice", listOf(alice)))
+        val impostor = PeerInfo(fpB, "alice", 2)
+        assertEquals("alice#aaaa", displayName(fpA, "alice", listOf(alice, impostor)))
+        assertEquals("alice#bbbb", displayName(fpB, "alice", listOf(alice, impostor)))
+    }
 }

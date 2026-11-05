@@ -63,6 +63,7 @@ import org.beacon.app.formatSize
 import org.beacon.app.GENERAL
 import org.beacon.app.MeshState
 import org.beacon.app.PeerInfo
+import org.beacon.app.displayName
 import org.beacon.app.dmFingerprint
 import org.beacon.app.dmKey
 import org.beacon.app.isDm
@@ -242,17 +243,17 @@ private fun ChatScreen(conversation: String, onConversation: (String) -> Unit) {
         }
         LazyColumn(Modifier.weight(1f).padding(horizontal = 16.dp), state = listState,
             verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            items(shown) { MessageRow(it) }
+            items(shown) { MessageRow(it, displayName(it.fromFingerprint, it.nickname, peers)) }
         }
         Composer(onSend = { MeshState.send(conversation, it) })
     }
 }
 
 @Composable
-private fun MessageRow(m: ChatMessage) {
+private fun MessageRow(m: ChatMessage, name: String) {
     val time = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(m.sentMillis))
     Column(Modifier.fillMaxWidth(), horizontalAlignment = if (m.mine) Alignment.End else Alignment.Start) {
-        Text(if (m.mine) "you · $time" else "${m.nickname} · $time", style = MaterialTheme.typography.labelSmall)
+        Text(if (m.mine) "you · $time" else "$name · $time", style = MaterialTheme.typography.labelSmall)
         Card { Text(m.text, Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) }
     }
 }

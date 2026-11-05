@@ -129,3 +129,12 @@ fun safeFileName(name: String): String {
     val cleaned = name.replace(Regex("[/\\\\:*?\"<>|\\p{Cntrl}]"), "_").trim().trimStart('.')
     return cleaned.take(120).ifEmpty { "shared-file" }
 }
+
+/**
+ * How a sender is shown: the nickname, tagged with the start of the
+ * fingerprint when someone else nearby uses the same nickname. Nicknames are
+ * free to copy; fingerprints are not.
+ */
+fun displayName(fingerprint: String, nickname: String, peers: List<PeerInfo>): String =
+    if (peers.any { it.nickname == nickname && it.fingerprint != fingerprint }) "$nickname#${fingerprint.take(4)}"
+    else nickname
