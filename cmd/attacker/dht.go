@@ -147,7 +147,7 @@ func cmdBadTorrents(args []string) error {
 		"absolute-path.torrent":     info("5:filesld6:lengthi5e4:pathl0:6:passwdeee4:name1:a12:piece lengthi16384e6:pieces20:" + pieces),
 		"name-slash.torrent":        info("6:lengthi5e4:name6:../etc12:piece lengthi16384e6:pieces20:" + pieces),
 		"leading-zero.torrent":      info("6:lengthi05e4:name1:a12:piece lengthi16384e6:pieces20:" + pieces),
-		"unsorted-keys.torrent":     info("4:name1:a6:lengthi5e12:piece lengthi16384e6:pieces20:" + pieces),
+		"duplicate-keys.torrent":    info("6:lengthi5e6:lengthi6e4:name1:a12:piece lengthi16384e6:pieces20:" + pieces),
 		"truncated.torrent":         info("6:lengthi5e4:name1:a12:piece lengthi16384e6:pieces20:")[:60],
 		"trailing-data.torrent":     info("6:lengthi5e4:name1:a12:piece lengthi16384e6:pieces20:"+pieces) + "junk",
 		"int-overflow.torrent":      info("6:lengthi99999999999999999999999e4:name1:a12:piece lengthi16384e6:pieces20:" + pieces),
