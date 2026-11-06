@@ -515,10 +515,13 @@ func (c *Client) rechoke(rotateOptimistic bool) {
 // report records what key did and, if that bans it, drops its connections.
 // It requires c.mu.
 func (c *Client) report(key string, e reputation.Event) {
+	already := c.rep.Banned(key)
 	if !c.rep.Record(key, e) {
 		return
 	}
-	c.log.Info("banning peer", "peer", key, "reason", e.String())
+	if !already {
+		c.log.Info("banning peer", "peer", key, "reason", e.String())
+	}
 	for pc := range c.conns {
 		if pc.key == key {
 			pc.close()
