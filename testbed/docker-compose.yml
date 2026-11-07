@@ -1,0 +1,47 @@
+# Beacon attack lab: honest nodes and an attacker on a private network with no
+# route to the internet (internal: true). Honest nodes live in 10.88.1.0/24;
+# the attacker sits in its own /24, 10.88.66.0/24, as a Sybil operator with
+# one cheap block of addresses would. Scenarios are driven by run.sh.
+name: beacon-lab
+
+x-node: &node
+  build:
+    context: ..
+    dockerfile: testbed/Dockerfile
+  image: beacon-lab
+  volumes:
+    - lab:/lab
+  init: true
+
+services:
+  seed:
+    <<: *node
+    networks: { lab: { ipv4_address: 10.88.1.10 } }
+  victim:
+    <<: *node
+    networks: { lab: { ipv4_address: 10.88.1.20 } }
+  dht:
+    <<: *node
+    networks: { lab: { ipv4_address: 10.88.1.30 } }
+  alice:
+    <<: *node
+    networks: { lab: { ipv4_address: 10.88.1.40 } }
+  bob:
+    <<: *node
+    networks: { lab: { ipv4_address: 10.88.1.41 } }
+  carol:
+    <<: *node
+    networks: { lab: { ipv4_address: 10.88.1.42 } }
+  attacker:
+    <<: *node
+    networks: { lab: { ipv4_address: 10.88.66.10 } }
+
+networks:
+  lab:
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.88.0.0/16
+
+volumes:
+  lab:
