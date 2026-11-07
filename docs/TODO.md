@@ -28,3 +28,11 @@ on phones.
 - [ ] **Groups across files.** A device is in one Wi-Fi Direct group at a time
       and declines offers for another group. Decide whether to leave a group
       that has no active transfers instead of declining.
+
+## Phase 8: attack lab
+
+- [ ] **Run the fake-announcement attack on phones.** It is covered by a Go
+      test only; the Docker testbed has no Wi-Fi Direct.
+- [ ] **Sign link setup.** A replayed announce with TTL 7 can get a
+      neighbour's link closed once a minute (see attacks.md, "Known limits").
+      A signed link handshake would close this; it changes the wire format.
