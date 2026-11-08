@@ -1,7 +1,22 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+// Release signing. The keystore is never in the repository: its location and
+// passwords come from environment variables (CI) or from an untracked
+// android/keystore.properties (local builds). Without them, the release APK is
+// left unsigned. See docs/RELEASING.md.
+val keystoreProps = Properties().apply {
+    val f = rootProject.file("keystore.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+fun signingValue(env: String, prop: String): String? =
+    System.getenv(env)?.takeIf { it.isNotEmpty() } ?: keystoreProps.getProperty(prop)
+
+val releaseStoreFile = signingValue("BEACON_KEYSTORE", "storeFile")
 
 android {
     namespace = "org.beacon.app"
@@ -11,13 +26,29 @@ android {
         applicationId = "org.beacon.app"
         minSdk = 26 // matches gomobile bind -androidapi 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.6.0"
+        // Set by the release workflow from the tag: -PversionName=1.0.0 -PversionCode=10000.
+        versionCode = (findProperty("versionCode") as String?)?.toInt() ?: 10000
+        versionName = (findProperty("versionName") as String?) ?: "1.0.0"
+    }
+
+    signingConfigs {
+        if (releaseStoreFile != null) {
+            create("release") {
+                storeFile = file(releaseStoreFile)
+                storePassword = signingValue("BEACON_KEYSTORE_PASSWORD", "storePassword")
+                keyAlias = signingValue("BEACON_KEY_ALIAS", "keyAlias")
+                keyPassword = signingValue("BEACON_KEY_PASSWORD", "keyPassword")
+                enableV1Signing = false // minSdk 26 uses APK Signature Scheme v2+
+                enableV2Signing = true
+                enableV3Signing = true
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("release")
         }
     }
     compileOptions {
