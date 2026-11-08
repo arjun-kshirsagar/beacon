@@ -1,0 +1,85 @@
+# Runs when a version tag is pushed (git tag v1.0.0 && git push origin v1.0.0).
+# GoReleaser makes a draft release with the desktop binaries, the signed APK is
+# added to it, and the release is published only when both have succeeded.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # the changelog needs history
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  android:
+    needs: desktop
+    runs-on: ubuntu-latest
+    environment: release # holds the signing secrets
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - name: version from tag
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          IFS=.- read -r major minor patch _ <<< "$v"
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$((major * 10000 + minor * 100 + patch))" >> "$GITHUB_ENV"
+      - name: build core.aar
+        run: ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME ./scripts/build-aar.sh
+      - name: build and sign the APK
+        working-directory: android
+        env:
+          KEYSTORE_BASE64: ${{ secrets.BEACON_KEYSTORE_BASE64 }}
+          BEACON_KEYSTORE_PASSWORD: ${{ secrets.BEACON_KEYSTORE_PASSWORD }}
+          BEACON_KEY_ALIAS: ${{ secrets.BEACON_KEY_ALIAS }}
+          BEACON_KEY_PASSWORD: ${{ secrets.BEACON_KEY_PASSWORD }}
+        run: |
+          test -n "$KEYSTORE_BASE64" || { echo "signing secrets are missing"; exit 1; }
+          export BEACON_KEYSTORE="$RUNNER_TEMP/release.jks"
+          trap 'rm -f "$BEACON_KEYSTORE"' EXIT
+          echo "$KEYSTORE_BASE64" | base64 -d > "$BEACON_KEYSTORE"
+          ./gradlew --no-daemon testDebugUnitTest assembleRelease \
+            -PversionName="$VERSION" -PversionCode="$VERSION_CODE"
+      - name: verify the signature
+        run: |
+          apk=android/app/build/outputs/apk/release/app-release.apk
+          apksigner=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)/apksigner
+          "$apksigner" verify --print-certs "$apk"
+          cp "$apk" "beacon-$VERSION.apk"
+          sha256sum "beacon-$VERSION.apk" > "beacon-$VERSION.apk.sha256"
+      - name: attach to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$GITHUB_REF_NAME" "beacon-$VERSION.apk" "beacon-$VERSION.apk.sha256" --clobber
+
+  publish:
+    needs: [desktop, android]
+    runs-on: ubuntu-latest
+    steps:
+      - name: publish the draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false
