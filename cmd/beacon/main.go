@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime/debug"
 )
 
 const usage = `beacon — peer-to-peer file sharing and chat
@@ -27,7 +28,20 @@ Commands:
 Run "beacon <command> -h" for a command's flags.
 `
 
-var version = "dev"
+// version is set at release time with -ldflags "-X main.version=...".
+var version = ""
+
+// versionString reports the release version, or the module version for a
+// binary built with "go install ...@v1.0.0", or "dev".
+func versionString() string {
+	if version != "" {
+		return version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return bi.Main.Version
+	}
+	return "dev"
+}
 
 // errUsage means the arguments were wrong; the usage text has been printed.
 var errUsage = errors.New("usage")
@@ -63,8 +77,8 @@ func run(ctx context.Context, args []string) error {
 		return cmdChat(ctx, args[1:])
 	case "tui":
 		return cmdTUI(ctx, args[1:])
-	case "version":
-		fmt.Println("beacon", version)
+	case "version", "-version", "--version":
+		fmt.Println("beacon", versionString())
 		return nil
 	case "help", "-h", "--help":
 		fmt.Print(usage)
