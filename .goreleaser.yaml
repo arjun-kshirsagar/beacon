@@ -1,0 +1,67 @@
+# GoReleaser builds the desktop binaries for a release. The Android APK is
+# built and signed separately (see docs/RELEASING.md) and attached to the same
+# GitHub release by .github/workflows/release.yml.
+version: 2
+
+project_name: beacon
+
+before:
+  hooks:
+    - go mod verify
+    - go test ./...
+
+builds:
+  - id: beacon
+    main: ./cmd/beacon
+    binary: beacon
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+# cmd/attacker is deliberately not built: the attack-lab tools are for the
+# Docker testbed only and are never shipped.
+
+archives:
+  - id: beacon
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE*
+      - docs/usage.md
+      - docs/protocol-spec.md
+      - docs/attacks.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^testbed:"
+      - "^Merge "
+
+release:
+  github:
+    owner: arjun-kshirsagar
+    name: beacon
+  draft: true
+  prerelease: auto
+  footer: |
+    The Android app is `beacon-{{ .Version }}.apk`, signed with the Beacon
+    release key. Check its certificate against the SHA-256 fingerprint in
+    the README before installing. Verify downloads with `checksums.txt`.

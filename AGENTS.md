@@ -54,6 +54,7 @@ go test -race ./...            # tests with the race detector
 go vet ./...                   # static checks
 go test ./core/<pkg> -run '^$' -fuzz <FuzzName> -fuzztime 30s   # fuzz a parser
 govulncheck ./...              # known-vulnerability scan
+make snapshot                  # release archives into dist/, nothing published
 ```
 
 Android (from `android/`):
