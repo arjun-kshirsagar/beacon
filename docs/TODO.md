@@ -36,3 +36,17 @@ on phones.
 - [ ] **Sign link setup.** A replayed announce with TTL 7 can get a
       neighbour's link closed once a minute (see attacks.md, "Known limits").
       A signed link handshake would close this; it changes the wire format.
+
+## Phase 9: release
+
+The release pipeline is in place ([RELEASING.md](RELEASING.md)); v1.0 is not
+tagged yet. What is left needs the maintainer:
+
+- [ ] **Create the release key** and add it as secrets of the `release`
+      environment on GitHub (RELEASING.md, "One-time setup").
+- [ ] **Put the key's certificate fingerprint in the README**, replacing the
+      placeholder under "Install".
+- [ ] **Choose a license** and add `LICENSE`; the release archives pick it up.
+- [ ] **Merge to `main`, let CI pass, then tag `v1.0.0`.** CI has not run on
+      GitHub yet; the workflows were checked locally (GoReleaser snapshot,
+      signed APK with a throwaway key).
