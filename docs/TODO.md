@@ -46,7 +46,7 @@ tagged yet. What is left needs the maintainer:
       environment on GitHub (RELEASING.md, "One-time setup").
 - [ ] **Put the key's certificate fingerprint in the README**, replacing the
       placeholder under "Install".
-- [ ] **Choose a license** and add `LICENSE`; the release archives pick it up.
+- [x] **Choose a license.** MIT, in `LICENSE`; the release archives include it.
 - [ ] **Merge to `main`, let CI pass, then tag `v1.0.0`.** CI has not run on
       GitHub yet; the workflows were checked locally (GoReleaser snapshot,
       signed APK with a throwaway key).

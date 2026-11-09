@@ -121,3 +121,7 @@ cd android && ./gradlew assembleDebug       # android/app/build/outputs/apk/debu
 
 Use legal content when testing against real swarms, such as Linux
 distribution images.
+
+## License
+
+Beacon is released under the [MIT License](LICENSE).
